@@ -24,7 +24,7 @@ function sleep(ms) {
 }
 
 const SOL = "So11111111111111111111111111111111111111112"
-const BASE = "https://api.jup.ag"
+const BASE = "https://lite.jup.ag"
 let TRADE_AMOUNT = 20000000
 
 async function getQuote(inputMint, outputMint, amount) {
@@ -34,20 +34,14 @@ async function getQuote(inputMint, outputMint, amount) {
     amount,
     slippageBps: 150
   })
-
-  const res = await fetch(`${BASE}/v6/quote?${params}`)
-
+  const res = await fetch(`${BASE}/v6/quote?${params}`, {
+    headers: { "x-api-key": process.env.JUP_API_KEY }
+  })
   const text = await res.text()
   console.log("QUOTE:", text)
-
-  if (!res.ok) {
-    throw new Error(`Quote failed: ${res.status}`)
-  }
-
+  if (!res.ok) throw new Error(`Quote failed: ${res.status}`)
   const data = JSON.parse(text)
-
   if (!data || !data.outAmount) {
-    console.log("⚠️ No route, increasing amount...")
     const biggerAmount = amount * 2
     const retryParams = new URLSearchParams({
       inputMint,
@@ -55,14 +49,13 @@ async function getQuote(inputMint, outputMint, amount) {
       amount: biggerAmount,
       slippageBps: 150
     })
-    const retryRes = await fetch(`${BASE}/v6/quote?${retryParams}`)
+    const retryRes = await fetch(`${BASE}/v6/quote?${retryParams}`, {
+      headers: { "x-api-key": process.env.JUP_API_KEY }
+    })
     const retryData = await retryRes.json()
-    if (!retryData || !retryData.outAmount) {
-      throw new Error("No routes even after retry")
-    }
+    if (!retryData || !retryData.outAmount) throw new Error("No routes even after retry")
     return retryData
   }
-
   return data
 }
 
@@ -70,7 +63,8 @@ async function executeSwap(wallet, quote) {
   const res = await fetch(`${BASE}/v6/swap`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "x-api-key": process.env.JUP_API_KEY
     },
     body: JSON.stringify({
       quoteResponse: quote,
@@ -78,27 +72,18 @@ async function executeSwap(wallet, quote) {
       wrapAndUnwrapSol: true
     })
   })
-
   const text = await res.text()
   console.log("SWAP:", text)
-
-  if (!res.ok) {
-    throw new Error(`Swap failed: ${res.status}`)
-  }
-
+  if (!res.ok) throw new Error(`Swap failed: ${res.status}`)
   const { swapTransaction } = JSON.parse(text)
-  const tx = VersionedTransaction.deserialize(
-    Buffer.from(swapTransaction, "base64")
-  )
+  const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"))
   tx.sign([wallet])
   const sig = await connection.sendTransaction(tx)
   console.log("✅ TRADE SUCCESS:", sig)
 }
 
 async function getTokenFromDexscreener() {
-  return {
-    address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-  }
+  return { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" }
 }
 
 async function runBot() {
