@@ -29,13 +29,16 @@ function sleep(ms) {
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-// ✅ QUOTE (FIXED WITH API KEY)
+// 🔥 SAFE AMOUNT (0.02 SOL)
+let TRADE_AMOUNT = 20000000
+
+// ✅ QUOTE (WITH RETRY + API KEY)
 async function getQuote(inputMint, outputMint, amount) {
   const params = new URLSearchParams({
     inputMint,
     outputMint,
     amount,
-    slippageBps: 100
+    slippageBps: 150
   })
 
   const res = await fetch(`${BASE}/v6/quote?${params}`, {
@@ -53,14 +56,38 @@ async function getQuote(inputMint, outputMint, amount) {
 
   const data = JSON.parse(text)
 
+  // 🔥 RETRY WITH HIGHER AMOUNT IF NO ROUTE
   if (!data.data || data.data.length === 0) {
-    throw new Error("No routes")
+    console.log("⚠️ No route, increasing amount...")
+
+    const biggerAmount = amount * 2
+
+    const retryParams = new URLSearchParams({
+      inputMint,
+      outputMint,
+      amount: biggerAmount,
+      slippageBps: 150
+    })
+
+    const retryRes = await fetch(`${BASE}/v6/quote?${retryParams}`, {
+      headers: {
+        "x-api-key": process.env.JUP_API_KEY
+      }
+    })
+
+    const retryData = await retryRes.json()
+
+    if (!retryData.data || retryData.data.length === 0) {
+      throw new Error("No routes even after retry")
+    }
+
+    return retryData.data[0]
   }
 
   return data.data[0]
 }
 
-// ✅ SWAP (FIXED WITH API KEY)
+// ✅ SWAP
 async function executeSwap(wallet, quote) {
   const res = await fetch(`${BASE}/v6/swap`, {
     method: "POST",
@@ -92,10 +119,10 @@ async function executeSwap(wallet, quote) {
 
   const sig = await connection.sendTransaction(tx)
 
-  console.log("✅ TRADE:", sig)
+  console.log("✅ TRADE SUCCESS:", sig)
 }
 
-// TEST TOKEN (SAFE)
+// TEST TOKEN (USDC)
 async function getTokenFromDexscreener() {
   return {
     address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -107,8 +134,6 @@ async function runBot() {
   const wallet = loadWallet()
 
   console.log("🚀 Running:", wallet.publicKey.toString())
-
-  // 🔍 DEBUG (REMOVE LATER)
   console.log("API KEY:", process.env.JUP_API_KEY ? "Loaded ✅" : "Missing ❌")
 
   while (true) {
@@ -120,17 +145,17 @@ async function runBot() {
       const quote = await getQuote(
         SOL,
         token.address,
-        1000000 // 0.001 SOL
+        TRADE_AMOUNT
       )
 
       await executeSwap(wallet, quote)
 
       console.log("⏳ Waiting...\n")
-      await sleep(20000)
+      await sleep(25000)
 
     } catch (e) {
       console.log("❌ ERROR:", e.message)
-      await sleep(5000)
+      await sleep(7000)
     }
   }
 }
