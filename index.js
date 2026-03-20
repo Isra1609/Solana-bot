@@ -1,15 +1,8 @@
 const fetch = require("node-fetch")
 const bs58 = require("bs58")
-const {
-  Keypair,
-  Connection,
-  VersionedTransaction
-} = require("@solana/web3.js")
+const { Keypair, Connection, VersionedTransaction } = require("@solana/web3.js")
 
-const connection = new Connection(
-  "https://api.mainnet-beta.solana.com",
-  "confirmed"
-)
+const connection = new Connection("https://api.mainnet-beta.solana.com", "confirmed")
 
 function loadWallet() {
   if (!process.env.PRIVATE_KEY) throw new Error("Missing PRIVATE_KEY")
@@ -23,16 +16,19 @@ function sleep(ms) {
 
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
+const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 let TRADE_AMOUNT = 20000000
 
 async function getOrderAndExecute(wallet) {
-  // Ultra API - order endpoint (replaces quote+swap)
   const orderRes = await fetch(`${BASE}/ultra/v1/order`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.JUP_API_KEY
+    },
     body: JSON.stringify({
       inputMint: SOL,
-      outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      outputMint: USDC,
       amount: TRADE_AMOUNT,
       taker: wallet.publicKey.toString()
     })
@@ -42,17 +38,16 @@ async function getOrderAndExecute(wallet) {
   if (!orderRes.ok) throw new Error(`Order failed: ${orderRes.status}`)
   const order = JSON.parse(orderText)
 
-  // Sign the transaction
-  const tx = VersionedTransaction.deserialize(
-    Buffer.from(order.transaction, "base64")
-  )
+  const tx = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"))
   tx.sign([wallet])
   const signedTx = Buffer.from(tx.serialize()).toString("base64")
 
-  // Execute
   const execRes = await fetch(`${BASE}/ultra/v1/execute`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": process.env.JUP_API_KEY
+    },
     body: JSON.stringify({
       signedTransaction: signedTx,
       requestId: order.requestId
