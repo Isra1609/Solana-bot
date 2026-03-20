@@ -34,15 +34,18 @@ async function getQuote(inputMint, outputMint, amount) {
     amount,
     slippageBps: 150
   })
-  const res = await fetch(`${BASE}/v6/quote?${params}`, {
-    headers: { "x-api-key": process.env.JUP_API_KEY }
-  })
+
+  const res = await fetch(`${BASE}/v6/quote?${params}`)
+
   const text = await res.text()
   console.log("QUOTE:", text)
+
   if (!res.ok) {
     throw new Error(`Quote failed: ${res.status}`)
   }
+
   const data = JSON.parse(text)
+
   if (!data || !data.outAmount) {
     console.log("⚠️ No route, increasing amount...")
     const biggerAmount = amount * 2
@@ -52,15 +55,14 @@ async function getQuote(inputMint, outputMint, amount) {
       amount: biggerAmount,
       slippageBps: 150
     })
-    const retryRes = await fetch(`${BASE}/v6/quote?${retryParams}`, {
-      headers: { "x-api-key": process.env.JUP_API_KEY }
-    })
+    const retryRes = await fetch(`${BASE}/v6/quote?${retryParams}`)
     const retryData = await retryRes.json()
     if (!retryData || !retryData.outAmount) {
       throw new Error("No routes even after retry")
     }
     return retryData
   }
+
   return data
 }
 
@@ -68,8 +70,7 @@ async function executeSwap(wallet, quote) {
   const res = await fetch(`${BASE}/v6/swap`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.JUP_API_KEY
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       quoteResponse: quote,
@@ -77,11 +78,14 @@ async function executeSwap(wallet, quote) {
       wrapAndUnwrapSol: true
     })
   })
+
   const text = await res.text()
   console.log("SWAP:", text)
+
   if (!res.ok) {
     throw new Error(`Swap failed: ${res.status}`)
   }
+
   const { swapTransaction } = JSON.parse(text)
   const tx = VersionedTransaction.deserialize(
     Buffer.from(swapTransaction, "base64")
@@ -100,7 +104,6 @@ async function getTokenFromDexscreener() {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Running:", wallet.publicKey.toString())
-  console.log("API KEY:", process.env.JUP_API_KEY ? "Loaded ✅" : "Missing ❌")
   while (true) {
     try {
       const token = await getTokenFromDexscreener()
