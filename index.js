@@ -6,33 +6,29 @@ const {
   VersionedTransaction
 } = require("@solana/web3.js")
 
-// 🔗 SOLANA CONNECTION
 const connection = new Connection(
   "https://api.mainnet-beta.solana.com",
   "confirmed"
 )
 
-// 🔑 LOAD WALLET
 function loadWallet() {
   if (!process.env.PRIVATE_KEY) {
-    throw new Error("❌ Missing PRIVATE_KEY in Railway variables")
+    throw new Error("Missing PRIVATE_KEY")
   }
 
   const decoded = bs58.decode(process.env.PRIVATE_KEY)
   return Keypair.fromSecretKey(decoded)
 }
 
-// ⏱ SLEEP
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms))
 }
 
-// SOL ADDRESS
 const SOL = "So11111111111111111111111111111111111111112"
 
-// ✅ GET JUPITER QUOTE
+// ✅ QUOTE (FINAL)
 async function getQuote(inputMint, outputMint, amount) {
-  const url = "https://api.jup.ag/v6/quote"
+  const url = "https://quote-api.jup.ag/v6/quote"
 
   const params = new URLSearchParams({
     inputMint,
@@ -41,10 +37,14 @@ async function getQuote(inputMint, outputMint, amount) {
     slippageBps: 100
   })
 
-  const res = await fetch(`${url}?${params}`)
+  const res = await fetch(`${url}?${params}`, {
+    headers: {
+      "Accept": "application/json"
+    }
+  })
 
   const text = await res.text()
-  console.log("QUOTE RESPONSE:", text)
+  console.log("QUOTE:", text)
 
   if (!res.ok) {
     throw new Error(`Quote failed: ${res.status}`)
@@ -53,18 +53,19 @@ async function getQuote(inputMint, outputMint, amount) {
   const data = JSON.parse(text)
 
   if (!data.data || data.data.length === 0) {
-    throw new Error("No routes found")
+    throw new Error("No routes")
   }
 
   return data.data[0]
 }
 
-// ✅ EXECUTE SWAP (FIXED URL)
+// ✅ SWAP (FINAL)
 async function executeSwap(wallet, quote) {
-  const res = await fetch("https://api.jup.ag/v6/swap", {
+  const res = await fetch("https://quote-api.jup.ag/v6/swap", {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "Accept": "application/json"
     },
     body: JSON.stringify({
       quoteResponse: quote,
@@ -74,7 +75,7 @@ async function executeSwap(wallet, quote) {
   })
 
   const text = await res.text()
-  console.log("SWAP RESPONSE:", text)
+  console.log("SWAP:", text)
 
   if (!res.ok) {
     throw new Error(`Swap failed: ${res.status}`)
@@ -90,37 +91,35 @@ async function executeSwap(wallet, quote) {
 
   const sig = await connection.sendTransaction(tx)
 
-  console.log("✅ TRADE SUCCESS:", sig)
+  console.log("✅ TRADE:", sig)
 }
 
-// ✅ SAFE TEST TOKEN (USDC)
+// TEST TOKEN
 async function getTokenFromDexscreener() {
   return {
     address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
   }
 }
 
-// 🚀 MAIN BOT LOOP
 async function runBot() {
   const wallet = loadWallet()
 
-  console.log("🚀 Bot running:", wallet.publicKey.toString())
+  console.log("🚀 Running:", wallet.publicKey.toString())
 
   while (true) {
     try {
       const token = await getTokenFromDexscreener()
 
-      console.log("🔍 Trying token:", token.address)
+      console.log("Trying:", token.address)
 
       const quote = await getQuote(
         SOL,
         token.address,
-        1000000 // 0.001 SOL (SAFE TEST)
+        1000000
       )
 
       await executeSwap(wallet, quote)
 
-      console.log("⏳ Waiting before next trade...\n")
       await sleep(20000)
 
     } catch (e) {
@@ -130,5 +129,4 @@ async function runBot() {
   }
 }
 
-// START BOT
 runBot()
