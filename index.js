@@ -8,7 +8,7 @@ const {
 } = require("@solana/web3.js")
 
 const connection = new Connection(
-  process.env.RPC_URL || "https://rpc.ankr.com/solana",
+  process.env.RPC_URL || "https://api.mainnet-beta.solana.com",
   "confirmed"
 )
 
@@ -29,13 +29,12 @@ const TAKE_PROFIT = 2.0
 const STOP_LOSS = 0.5
 const MAX_HOLD_TIME = 60000
 const DEX_SCAN_INTERVAL = 30000
-const RAYDIUM_SCAN_INTERVAL = 10000
+const RAYDIUM_SCAN_INTERVAL = 60000
 
 const positions = new Map()
 const triedTokens = new Set()
 let lastRaydiumSig = null
 
-// ── JUPITER SWAP ──────────────────────────────────────────────────────────────
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
     inputMint, outputMint, amount,
@@ -62,7 +61,6 @@ async function swap(wallet, inputMint, outputMint, amount) {
   return result
 }
 
-// ── GET PRICE ─────────────────────────────────────────────────────────────────
 async function getPrice(tokenMint) {
   try {
     const res = await fetch(`${BASE}/price/v2?ids=${tokenMint}`, {
@@ -74,7 +72,6 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
-// ── SAFETY CHECK ──────────────────────────────────────────────────────────────
 async function isSafe(tokenMint) {
   try {
     const res = await fetch(`${BASE}/tokens/v1/token/${tokenMint}`, {
@@ -88,7 +85,6 @@ async function isSafe(tokenMint) {
   } catch { return false }
 }
 
-// ── BUY TOKEN ─────────────────────────────────────────────────────────────────
 async function buyToken(wallet, tokenMint, source) {
   if (!tokenMint || positions.has(tokenMint)) return
   if (triedTokens.has(tokenMint)) return
@@ -113,7 +109,6 @@ async function buyToken(wallet, tokenMint, source) {
   }
 }
 
-// ── MONITOR POSITIONS ─────────────────────────────────────────────────────────
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
@@ -140,7 +135,6 @@ async function monitorPositions(wallet) {
   }
 }
 
-// ── POLL RAYDIUM (no WebSocket) ───────────────────────────────────────────────
 async function pollRaydium(wallet) {
   try {
     const sigs = await connection.getSignaturesForAddress(
@@ -176,7 +170,6 @@ async function pollRaydium(wallet) {
   }
 }
 
-// ── DEXSCREENER SCAN ──────────────────────────────────────────────────────────
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
@@ -211,7 +204,6 @@ async function scanDexScreener(wallet) {
   }
 }
 
-// ── MAIN ──────────────────────────────────────────────────────────────────────
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
