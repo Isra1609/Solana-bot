@@ -25,11 +25,10 @@ function sleep(ms) {
 }
 
 const SOL = "So11111111111111111111111111111111111111112"
+const BASE = "https://api.jup.ag"
 
-// ✅ QUOTE (FINAL)
+// ✅ QUOTE
 async function getQuote(inputMint, outputMint, amount) {
-  const url = "https://quote-api.jup.ag/v6/quote"
-
   const params = new URLSearchParams({
     inputMint,
     outputMint,
@@ -37,11 +36,7 @@ async function getQuote(inputMint, outputMint, amount) {
     slippageBps: 100
   })
 
-  const res = await fetch(`${url}?${params}`, {
-    headers: {
-      "Accept": "application/json"
-    }
-  })
+  const res = await fetch(`${BASE}/v6/quote?${params}`)
 
   const text = await res.text()
   console.log("QUOTE:", text)
@@ -59,13 +54,12 @@ async function getQuote(inputMint, outputMint, amount) {
   return data.data[0]
 }
 
-// ✅ SWAP (FINAL)
+// ✅ SWAP
 async function executeSwap(wallet, quote) {
-  const res = await fetch("https://quote-api.jup.ag/v6/swap", {
+  const res = await fetch(`${BASE}/v6/swap`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      "Accept": "application/json"
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
       quoteResponse: quote,
@@ -94,7 +88,7 @@ async function executeSwap(wallet, quote) {
   console.log("✅ TRADE:", sig)
 }
 
-// TEST TOKEN
+// TEST TOKEN (SAFE)
 async function getTokenFromDexscreener() {
   return {
     address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
