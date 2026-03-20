@@ -15,23 +15,21 @@ function sleep(ms) {
 }
 
 const SOL = "So11111111111111111111111111111111111111112"
-const BASE = "https://api.jup.ag"
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const BASE = "https://api.jup.ag"
 let TRADE_AMOUNT = 20000000
 
 async function getOrderAndExecute(wallet) {
-  const orderRes = await fetch(`${BASE}/ultra/v1/order`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": process.env.JUP_API_KEY
-    },
-    body: JSON.stringify({
-      inputMint: SOL,
-      outputMint: USDC,
-      amount: TRADE_AMOUNT,
-      taker: wallet.publicKey.toString()
-    })
+  // GET request with query params
+  const params = new URLSearchParams({
+    inputMint: SOL,
+    outputMint: USDC,
+    amount: TRADE_AMOUNT,
+    taker: wallet.publicKey.toString()
+  })
+
+  const orderRes = await fetch(`${BASE}/ultra/v1/order?${params}`, {
+    headers: { "x-api-key": process.env.JUP_API_KEY }
   })
   const orderText = await orderRes.text()
   console.log("ORDER:", orderText)
