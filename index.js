@@ -1,93 +1,104 @@
-const { Connection, Keypair } = require("@solana/web3.js")
+const fetch = require("node-fetch")
 const bs58 = require("bs58")
-const axios = require("axios")
+const {
+  Keypair,
+  Connection,
+  VersionedTransaction
+} = require("@solana/web3.js")
 
-// ===== ENV VARIABLES =====
-const PRIVATE_KEY = process.env.PRIVATE_KEY
-const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com"
-const AMOUNT_SOL = parseFloat(process.env.AMOUNT_SOL || "0.01")
+const connection = new Connection(
+  "https://api.mainnet-beta.solana.com",
+  "confirmed"
+)
 
-// ===== CONNECTION =====
-const connection = new Connection(RPC_URL)
-
-// ===== WALLET =====
-let wallet
-
-try {
-  if (!PRIVATE_KEY) throw new Error("Missing PRIVATE_KEY")
-
-  wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY))
-  console.log("✅ Wallet loaded:", wallet.publicKey.toBase58())
-
-} catch (err) {
-  console.log("❌ Wallet error:", err.message)
-  process.exit(1)
+function loadWallet() {
+  const decoded = bs58.decode(process.env.PRIVATE_KEY)
+  return Keypair.fromSecretKey(decoded)
 }
 
-// ===== GET TRENDING TOKENS =====
-async function getTrending() {
-  try {
-    const res = await axios.get(
-      "https://api.dexscreener.com/latest/dex/search?q=solana"
-    )
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms))
+}
 
-    return res.data.pairs.slice(0, 5)
+const SOL = "So11111111111111111111111111111111111111112"
 
-  } catch (err) {
-    console.log("❌ Dexscreener error:", err.message)
-    return []
+async function getQuote(inputMint, outputMint, amount) {
+  const url = "https://quote-api.jup.ag/v6/quote"
+
+  const params = new URLSearchParams({
+    inputMint,
+    outputMint,
+    amount,
+    slippageBps: 100
+  })
+
+  const res = await fetch(`${url}?${params}`)
+  const data = await res.json()
+
+  if (!data.data || data.data.length === 0) {
+    throw new Error("No routes")
   }
+
+  return data.data[0]
 }
 
-// ===== JUPITER QUOTE =====
-async function getQuote(tokenAddress) {
-  try {
-    console.log("🔄 Attempting trade:", tokenAddress)
-
-    const res = await axios.get("https://api.jup.ag/v6/quote", {
-      params: {
-        inputMint: "So11111111111111111111111111111111111111112", // SOL
-        outputMint: tokenAddress,
-        amount: AMOUNT_SOL * 1e9,
-        slippageBps: 500
-      }
+async function executeSwap(wallet, quote) {
+  const res = await fetch("https://quote-api.jup.ag/v6/swap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: wallet.publicKey.toString(),
+      wrapAndUnwrapSol: true
     })
+  })
 
-    if (!res.data.data || res.data.data.length === 0) {
-      console.log("❌ No route found")
-      return null
-    }
+  const { swapTransaction } = await res.json()
 
-    console.log("✅ Found route")
-    return res.data.data[0]
+  const tx = VersionedTransaction.deserialize(
+    Buffer.from(swapTransaction, "base64")
+  )
 
-  } catch (err) {
-    console.log("❌ Quote error:", err.message)
-    return null
+  tx.sign([wallet])
+
+  const sig = await connection.sendTransaction(tx)
+
+  console.log("TRADE:", sig)
+}
+
+// SIMPLE TOKEN (TEMP)
+async function getTokenFromDexscreener() {
+  return {
+    address: "DezXAZ8z7PnrnRJjz3vGd8c7YxXzvZ6p5VZ1Zy9pump" // example
   }
 }
 
-// ===== MAIN LOOP =====
 async function runBot() {
+  const wallet = loadWallet()
+
+  console.log("🚀 Bot running:", wallet.publicKey.toString())
+
   while (true) {
     try {
-      console.log("🔍 Scanning...")
+      const token = await getTokenFromDexscreener()
 
-      const tokens = await getTrending()
+      console.log("Trying:", token.address)
 
-      for (let t of tokens) {
-        if (!t?.baseToken?.address) continue
+      const quote = await getQuote(
+        SOL,
+        token.address,
+        10000000
+      )
 
-        await getQuote(t.baseToken.address)
-      }
+      await executeSwap(wallet, quote)
 
-      await new Promise(r => setTimeout(r, 15000))
+      await sleep(15000)
 
-    } catch (err) {
-      console.log("❌ Loop error:", err.message)
+    } catch (e) {
+      console.log("ERROR:", e.message)
+      await sleep(5000)
     }
   }
 }
 
-// ===== START =====
 runBot()
