@@ -32,7 +32,7 @@ const SOL = "So11111111111111111111111111111111111111112"
 
 // ✅ GET JUPITER QUOTE (FIXED)
 async function getQuote(inputMint, outputMint, amount) {
-  const url = "https://quote-api.jup.ag/v6/quote"
+  const url = "https://api.jup.ag/v6/quote"
 
   const params = new URLSearchParams({
     inputMint,
