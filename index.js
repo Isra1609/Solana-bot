@@ -30,7 +30,7 @@ function sleep(ms) {
 // SOL ADDRESS
 const SOL = "So11111111111111111111111111111111111111112"
 
-// ✅ GET JUPITER QUOTE (FIXED)
+// ✅ GET JUPITER QUOTE
 async function getQuote(inputMint, outputMint, amount) {
   const url = "https://api.jup.ag/v6/quote"
 
@@ -59,9 +59,9 @@ async function getQuote(inputMint, outputMint, amount) {
   return data.data[0]
 }
 
-// ✅ EXECUTE SWAP
+// ✅ EXECUTE SWAP (FIXED URL)
 async function executeSwap(wallet, quote) {
-  const res = await fetch("https://quote-api.jup.ag/v6/swap", {
+  const res = await fetch("https://api.jup.ag/v6/swap", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -96,7 +96,7 @@ async function executeSwap(wallet, quote) {
 // ✅ SAFE TEST TOKEN (USDC)
 async function getTokenFromDexscreener() {
   return {
-    address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
+    address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
   }
 }
 
@@ -115,7 +115,7 @@ async function runBot() {
       const quote = await getQuote(
         SOL,
         token.address,
-        1000000 // ✅ 0.001 SOL (SAFE TEST)
+        1000000 // 0.001 SOL (SAFE TEST)
       )
 
       await executeSwap(wallet, quote)
