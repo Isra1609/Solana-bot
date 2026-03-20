@@ -24,7 +24,7 @@ function sleep(ms) {
 }
 
 const SOL = "So11111111111111111111111111111111111111112"
-const BASE = "https://lite.jup.ag"
+const BASE = "https://api.jup.ag"
 let TRADE_AMOUNT = 20000000
 
 async function getQuote(inputMint, outputMint, amount) {
