@@ -23,17 +23,14 @@ function sleep(ms) {
 
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
-const RAYDIUM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
 const BUY_AMOUNT = 20000000
 const TAKE_PROFIT = 2.0
 const STOP_LOSS = 0.5
 const MAX_HOLD_TIME = 60000
 const DEX_SCAN_INTERVAL = 30000
-const RAYDIUM_SCAN_INTERVAL = 60000
 
 const positions = new Map()
 const triedTokens = new Set()
-let lastRaydiumSig = null
 
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
@@ -72,17 +69,35 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
+// ── NEW SAFETY CHECK — uses DexScreener data ──────────────────────────────────
 async function isSafe(tokenMint) {
   try {
-    const res = await fetch(`${BASE}/tokens/v1/token/${tokenMint}`, {
-      headers: { "x-api-key": process.env.JUP_API_KEY }
-    })
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
     if (!res.ok) return false
-    const token = await res.json()
-    if (token.freezeAuthority) return false
-    if (token.mintAuthority) return false
+    const data = await res.json()
+
+    if (!data || data.length === 0) return false
+    const pair = data[0]
+
+    const liquidity = pair?.liquidity?.usd || 0
+    const volume24h = pair?.volume?.h24 || 0
+    const age = pair?.pairCreatedAt
+      ? (Date.now() - pair.pairCreatedAt) / 1000 / 60  // age in minutes
+      : 9999
+
+    console.log(`🔎 Liquidity: $${liquidity} | Vol24h: $${volume24h} | Age: ${age.toFixed(1)}min`)
+
+    // Filters:
+    if (liquidity < 5000) { console.log("❌ Too little liquidity"); return false }
+    if (liquidity > 500000) { console.log("❌ Too big, not enough upside"); return false }
+    if (volume24h < 1000) { console.log("❌ Too little volume"); return false }
+    if (age > 120) { console.log("❌ Token too old"); return false }
+
     return true
-  } catch { return false }
+  } catch (e) {
+    console.log(`❌ Safety check error: ${e.message}`)
+    return false
+  }
 }
 
 async function buyToken(wallet, tokenMint, source) {
@@ -94,7 +109,7 @@ async function buyToken(wallet, tokenMint, source) {
   console.log(`🎯 [${source}] Trying: ${tokenMint}`)
 
   const safe = await isSafe(tokenMint)
-  if (!safe) { console.log(`❌ Safety check failed`); return }
+  if (!safe) return
 
   const buyPrice = await getPrice(tokenMint)
   if (!buyPrice) { console.log(`❌ No price found`); return }
@@ -135,67 +150,36 @@ async function monitorPositions(wallet) {
   }
 }
 
-async function pollRaydium(wallet) {
-  try {
-    const sigs = await connection.getSignaturesForAddress(
-      new PublicKey(RAYDIUM_PROGRAM),
-      { limit: 5 }
-    )
-    for (const sigInfo of sigs) {
-      if (sigInfo.signature === lastRaydiumSig) break
-      const tx = await connection.getParsedTransaction(sigInfo.signature, {
-        maxSupportedTransactionVersion: 0
-      })
-      if (!tx) continue
-
-      const logs = tx.meta?.logMessages || []
-      const isNewPool = logs.some(l =>
-        l.includes("initialize2") || l.includes("InitializeInstruction2")
-      )
-      if (!isNewPool) continue
-
-      console.log(`🆕 New Raydium pool! TX: ${sigInfo.signature}`)
-      const mints = tx.transaction.message.accountKeys
-        .map(k => k.pubkey.toString())
-        .filter(k => k !== SOL && k.length >= 32)
-
-      for (const mint of mints) {
-        await buyToken(wallet, mint, "RAYDIUM")
-        break
-      }
-    }
-    if (sigs.length > 0) lastRaydiumSig = sigs[0].signature
-  } catch (e) {
-    console.log(`❌ Raydium poll error: ${e.message}`)
-  }
-}
-
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
 
+    // Top boosted tokens
     const boostRes = await fetch("https://api.dexscreener.com/token-boosts/top/v1")
     if (boostRes.ok) {
       const tokens = await boostRes.json()
-      const top = tokens.filter(t => t.chainId === "solana" && t.amount > 100).slice(0, 5)
+      const top = tokens
+        .filter(t => t.chainId === "solana" && t.amount > 50)
+        .slice(0, 5)
       for (const token of top) {
         if (token.tokenAddress) {
           console.log(`📈 Boosted: ${token.tokenAddress} | boost: ${token.amount}`)
-          await buyToken(wallet, token.tokenAddress, "DEXSCREENER_BOOST")
-          await sleep(1000)
+          await buyToken(wallet, token.tokenAddress, "BOOST")
+          await sleep(500)
         }
       }
     }
 
+    // Latest new tokens
     const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
     if (newRes.ok) {
       const tokens = await newRes.json()
-      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 3)
+      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 5)
       for (const token of newSolana) {
         if (token.tokenAddress) {
           console.log(`🆕 New token: ${token.tokenAddress}`)
-          await buyToken(wallet, token.tokenAddress, "DEXSCREENER_NEW")
-          await sleep(1000)
+          await buyToken(wallet, token.tokenAddress, "NEW")
+          await sleep(500)
         }
       }
     }
@@ -211,15 +195,9 @@ async function runBot() {
   await scanDexScreener(wallet)
 
   let lastDexScan = Date.now()
-  let lastRaydiumPoll = Date.now()
 
   while (true) {
     await monitorPositions(wallet)
-
-    if (Date.now() - lastRaydiumPoll > RAYDIUM_SCAN_INTERVAL) {
-      await pollRaydium(wallet)
-      lastRaydiumPoll = Date.now()
-    }
 
     if (Date.now() - lastDexScan > DEX_SCAN_INTERVAL) {
       await scanDexScreener(wallet)
