@@ -11,6 +11,7 @@ const connection = new Connection(
   "confirmed"
 )
 
+// 🔑 LOAD WALLET
 function loadWallet() {
   if (!process.env.PRIVATE_KEY) {
     throw new Error("Missing PRIVATE_KEY")
@@ -20,6 +21,7 @@ function loadWallet() {
   return Keypair.fromSecretKey(decoded)
 }
 
+// ⏱ SLEEP
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms))
 }
@@ -27,7 +29,7 @@ function sleep(ms) {
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-// ✅ QUOTE
+// ✅ QUOTE (FIXED WITH API KEY)
 async function getQuote(inputMint, outputMint, amount) {
   const params = new URLSearchParams({
     inputMint,
@@ -36,7 +38,11 @@ async function getQuote(inputMint, outputMint, amount) {
     slippageBps: 100
   })
 
-  const res = await fetch(`${BASE}/v6/quote?${params}`)
+  const res = await fetch(`${BASE}/v6/quote?${params}`, {
+    headers: {
+      "x-api-key": process.env.JUP_API_KEY
+    }
+  })
 
   const text = await res.text()
   console.log("QUOTE:", text)
@@ -54,12 +60,13 @@ async function getQuote(inputMint, outputMint, amount) {
   return data.data[0]
 }
 
-// ✅ SWAP
+// ✅ SWAP (FIXED WITH API KEY)
 async function executeSwap(wallet, quote) {
   const res = await fetch(`${BASE}/v6/swap`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "x-api-key": process.env.JUP_API_KEY
     },
     body: JSON.stringify({
       quoteResponse: quote,
@@ -95,10 +102,14 @@ async function getTokenFromDexscreener() {
   }
 }
 
+// 🚀 MAIN LOOP
 async function runBot() {
   const wallet = loadWallet()
 
   console.log("🚀 Running:", wallet.publicKey.toString())
+
+  // 🔍 DEBUG (REMOVE LATER)
+  console.log("API KEY:", process.env.JUP_API_KEY ? "Loaded ✅" : "Missing ❌")
 
   while (true) {
     try {
@@ -109,11 +120,12 @@ async function runBot() {
       const quote = await getQuote(
         SOL,
         token.address,
-        1000000
+        1000000 // 0.001 SOL
       )
 
       await executeSwap(wallet, quote)
 
+      console.log("⏳ Waiting...\n")
       await sleep(20000)
 
     } catch (e) {
