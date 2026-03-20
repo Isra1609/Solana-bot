@@ -24,22 +24,21 @@ function sleep(ms) {
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 const RAYDIUM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
-const BUY_AMOUNT = 20000000      // 0.02 SOL
-const TAKE_PROFIT = 2.0          // sell at 2x
-const STOP_LOSS = 0.5            // sell at -50%
-const CHECK_INTERVAL = 3000      // check positions every 3s
-const MAX_HOLD_TIME = 60000      // force sell after 60s
-const DEX_SCAN_INTERVAL = 30000  // scan dexscreener every 30s
+const BUY_AMOUNT = 20000000
+const TAKE_PROFIT = 2.0
+const STOP_LOSS = 0.5
+const MAX_HOLD_TIME = 60000
+const DEX_SCAN_INTERVAL = 30000
+const RAYDIUM_SCAN_INTERVAL = 10000
 
 const positions = new Map()
-const triedTokens = new Set()    // avoid buying same token twice
+const triedTokens = new Set()
+let lastRaydiumSig = null
 
 // ── JUPITER SWAP ──────────────────────────────────────────────────────────────
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
-    inputMint,
-    outputMint,
-    amount,
+    inputMint, outputMint, amount,
     taker: wallet.publicKey.toString()
   })
   const orderRes = await fetch(`${BASE}/ultra/v1/order?${params}`, {
@@ -63,7 +62,7 @@ async function swap(wallet, inputMint, outputMint, amount) {
   return result
 }
 
-// ── GET TOKEN PRICE ───────────────────────────────────────────────────────────
+// ── GET PRICE ─────────────────────────────────────────────────────────────────
 async function getPrice(tokenMint) {
   try {
     const res = await fetch(`${BASE}/price/v2?ids=${tokenMint}`, {
@@ -72,9 +71,7 @@ async function getPrice(tokenMint) {
     if (!res.ok) return null
     const data = await res.json()
     return parseFloat(data?.data?.[tokenMint]?.price) || null
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
 // ── SAFETY CHECK ──────────────────────────────────────────────────────────────
@@ -88,14 +85,12 @@ async function isSafe(tokenMint) {
     if (token.freezeAuthority) return false
     if (token.mintAuthority) return false
     return true
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
 // ── BUY TOKEN ─────────────────────────────────────────────────────────────────
 async function buyToken(wallet, tokenMint, source) {
-  if (positions.has(tokenMint)) return
+  if (!tokenMint || positions.has(tokenMint)) return
   if (triedTokens.has(tokenMint)) return
   if (positions.size >= 3) return
 
@@ -103,27 +98,16 @@ async function buyToken(wallet, tokenMint, source) {
   console.log(`🎯 [${source}] Trying: ${tokenMint}`)
 
   const safe = await isSafe(tokenMint)
-  if (!safe) {
-    console.log(`❌ Safety check failed`)
-    return
-  }
+  if (!safe) { console.log(`❌ Safety check failed`); return }
 
   const buyPrice = await getPrice(tokenMint)
-  if (!buyPrice) {
-    console.log(`❌ Could not get price`)
-    return
-  }
+  if (!buyPrice) { console.log(`❌ No price found`); return }
 
   try {
     const result = await swap(wallet, SOL, tokenMint, BUY_AMOUNT)
     const outAmount = result.outputAmount || result.totalOutputAmount
-    console.log(`✅ Bought ${tokenMint} at $${buyPrice} | amount: ${outAmount}`)
-    positions.set(tokenMint, {
-      buyPrice,
-      amount: outAmount,
-      timestamp: Date.now(),
-      source
-    })
+    console.log(`✅ Bought ${tokenMint} | price: $${buyPrice} | amount: ${outAmount}`)
+    positions.set(tokenMint, { buyPrice, amount: outAmount, timestamp: Date.now(), source })
   } catch (e) {
     console.log(`❌ Buy failed: ${e.message}`)
   }
@@ -140,12 +124,7 @@ async function monitorPositions(wallet) {
       const elapsed = Date.now() - pos.timestamp
       const pct = ((ratio - 1) * 100).toFixed(1)
 
-      const shouldSell =
-        ratio >= TAKE_PROFIT ||
-        ratio <= STOP_LOSS ||
-        elapsed >= MAX_HOLD_TIME
-
-      if (shouldSell) {
+      if (ratio >= TAKE_PROFIT || ratio <= STOP_LOSS || elapsed >= MAX_HOLD_TIME) {
         const reason = ratio >= TAKE_PROFIT ? "🎯 TAKE PROFIT" :
                        ratio <= STOP_LOSS   ? "🛑 STOP LOSS"  : "⏰ TIME LIMIT"
         console.log(`${reason} | ${pct}% | ${tokenMint}`)
@@ -161,97 +140,75 @@ async function monitorPositions(wallet) {
   }
 }
 
+// ── POLL RAYDIUM (no WebSocket) ───────────────────────────────────────────────
+async function pollRaydium(wallet) {
+  try {
+    const sigs = await connection.getSignaturesForAddress(
+      new PublicKey(RAYDIUM_PROGRAM),
+      { limit: 5 }
+    )
+    for (const sigInfo of sigs) {
+      if (sigInfo.signature === lastRaydiumSig) break
+      const tx = await connection.getParsedTransaction(sigInfo.signature, {
+        maxSupportedTransactionVersion: 0
+      })
+      if (!tx) continue
+
+      const logs = tx.meta?.logMessages || []
+      const isNewPool = logs.some(l =>
+        l.includes("initialize2") || l.includes("InitializeInstruction2")
+      )
+      if (!isNewPool) continue
+
+      console.log(`🆕 New Raydium pool! TX: ${sigInfo.signature}`)
+      const mints = tx.transaction.message.accountKeys
+        .map(k => k.pubkey.toString())
+        .filter(k => k !== SOL && k.length >= 32)
+
+      for (const mint of mints) {
+        await buyToken(wallet, mint, "RAYDIUM")
+        break
+      }
+    }
+    if (sigs.length > 0) lastRaydiumSig = sigs[0].signature
+  } catch (e) {
+    console.log(`❌ Raydium poll error: ${e.message}`)
+  }
+}
+
 // ── DEXSCREENER SCAN ──────────────────────────────────────────────────────────
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
 
-    // Get top trending Solana tokens
-    const res = await fetch(
-      "https://api.dexscreener.com/token-boosts/top/v1"
-    )
-    if (!res.ok) return
-    const tokens = await res.json()
-
-    // Filter for Solana tokens with strong metrics
-    const solanaTokens = tokens
-      .filter(t =>
-        t.chainId === "solana" &&
-        t.amount > 100  // has decent boost amount
-      )
-      .slice(0, 5)  // top 5
-
-    for (const token of solanaTokens) {
-      const mint = token.tokenAddress
-      if (!mint || triedTokens.has(mint)) continue
-
-      console.log(`📈 DexScreener boost: ${mint} | amount: ${token.amount}`)
-      await buyToken(wallet, mint, "DEXSCREENER")
-      await sleep(1000)
+    const boostRes = await fetch("https://api.dexscreener.com/token-boosts/top/v1")
+    if (boostRes.ok) {
+      const tokens = await boostRes.json()
+      const top = tokens.filter(t => t.chainId === "solana" && t.amount > 100).slice(0, 5)
+      for (const token of top) {
+        if (token.tokenAddress) {
+          console.log(`📈 Boosted: ${token.tokenAddress} | boost: ${token.amount}`)
+          await buyToken(wallet, token.tokenAddress, "DEXSCREENER_BOOST")
+          await sleep(1000)
+        }
+      }
     }
 
-    // Also check latest new pairs on Solana
-    const pairsRes = await fetch(
-      "https://api.dexscreener.com/token-profiles/latest/v1"
-    )
-    if (!pairsRes.ok) return
-    const pairs = await pairsRes.json()
-
-    const newSolanaPairs = pairs
-      .filter(t => t.chainId === "solana")
-      .slice(0, 3)
-
-    for (const token of newSolanaPairs) {
-      const mint = token.tokenAddress
-      if (!mint || triedTokens.has(mint)) continue
-
-      console.log(`🆕 New Solana token: ${mint}`)
-      await buyToken(wallet, mint, "NEW_PAIR")
-      await sleep(1000)
+    const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
+    if (newRes.ok) {
+      const tokens = await newRes.json()
+      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 3)
+      for (const token of newSolana) {
+        if (token.tokenAddress) {
+          console.log(`🆕 New token: ${token.tokenAddress}`)
+          await buyToken(wallet, token.tokenAddress, "DEXSCREENER_NEW")
+          await sleep(1000)
+        }
+      }
     }
   } catch (e) {
     console.log(`❌ DexScreener error: ${e.message}`)
   }
-}
-
-// ── WATCH RAYDIUM POOLS ───────────────────────────────────────────────────────
-async function watchNewPools(wallet) {
-  console.log("👀 Watching for new Raydium pools...")
-  connection.onLogs(
-    new PublicKey(RAYDIUM_PROGRAM),
-    async ({ logs, signature }) => {
-      try {
-        const isNewPool = logs.some(log =>
-          log.includes("initialize2") || log.includes("InitializeInstruction2")
-        )
-        if (!isNewPool) return
-
-        console.log(`🆕 New Raydium pool! TX: ${signature}`)
-        await sleep(2000)
-
-        const tx = await connection.getParsedTransaction(signature, {
-          maxSupportedTransactionVersion: 0
-        })
-        if (!tx) return
-
-        const mints = tx.transaction.message.accountKeys
-          .map(k => k.pubkey.toString())
-          .filter(k =>
-            k !== SOL &&
-            k !== "So11111111111111111111111111111111111111112" &&
-            k.length >= 32
-          )
-
-        for (const mint of mints) {
-          await buyToken(wallet, mint, "RAYDIUM")
-          break
-        }
-      } catch (e) {
-        console.log("❌ Pool watch error:", e.message)
-      }
-    },
-    "confirmed"
-  )
 }
 
 // ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -259,23 +216,25 @@ async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
 
-  await watchNewPools(wallet)
-
-  // Initial DexScreener scan
   await scanDexScreener(wallet)
 
-  // Main loop
   let lastDexScan = Date.now()
+  let lastRaydiumPoll = Date.now()
+
   while (true) {
     await monitorPositions(wallet)
 
-    // Scan DexScreener every 30s
+    if (Date.now() - lastRaydiumPoll > RAYDIUM_SCAN_INTERVAL) {
+      await pollRaydium(wallet)
+      lastRaydiumPoll = Date.now()
+    }
+
     if (Date.now() - lastDexScan > DEX_SCAN_INTERVAL) {
       await scanDexScreener(wallet)
       lastDexScan = Date.now()
     }
 
-    await sleep(CHECK_INTERVAL)
+    await sleep(3000)
   }
 }
 
