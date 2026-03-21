@@ -190,7 +190,8 @@ async function buyToken(wallet, tokenMint, source) {
   const check = await checkToken(tokenMint)
   if (!check) return
 
-  const buyPrice = await getPrice(tokenMint)
+  // Use DexScreener price first, fall back to Jupiter
+  const buyPrice = parseFloat(check.pair?.priceUsd) || await getPrice(tokenMint)
   if (!buyPrice) { console.log(`❌ No price`); return }
 
   const tradeAmount = await getTradeAmount(wallet)
@@ -217,7 +218,12 @@ async function buyToken(wallet, tokenMint, source) {
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
-      const currentPrice = await getPrice(tokenMint)
+      const currentPrice = await getPrice(tokenMint) || await (async () => {
+        const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
+        if (!res.ok) return null
+        const data = await res.json()
+        return parseFloat(data?.[0]?.priceUsd) || null
+      })()
       if (!currentPrice) continue
 
       const ratio   = currentPrice / pos.buyPrice
