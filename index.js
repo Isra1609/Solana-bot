@@ -65,7 +65,7 @@ const CFG = {
   MOMENTUM_CHECK_INTERVAL: 60000,                                          // check momentum every 60s
 
   // Circuit breakers
-  DAILY_LOSS_LIMIT_PCT:  parseFloat(process.env.DAILY_LOSS   || "0.20"),  // -20% day halt
+  DAILY_LOSS_LIMIT_PCT:  parseFloat(process.env.DAILY_LOSS   || "999"),   // disabled — set to 999 (never triggers)
   CONSEC_LOSSES_HALVE:   parseInt(  process.env.CONSEC_L     || "3"),     // 3 losses → half size
   MAX_FAILED_SWAPS:      parseInt(  process.env.MAX_FAIL     || "5"),     // 5 failed swaps → pause
   FAILED_SWAP_WINDOW_MS: 3600000,                                          // 1h window
