@@ -93,7 +93,7 @@ const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
 const MAX_POSITIONS        = 2
-const MIN_SCORE            = 12
+const MIN_SCORE            = 10     // lowered from 12 to catch more opportunities
 
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
