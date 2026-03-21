@@ -85,10 +85,10 @@ async function getTradeAmount(wallet) {
 const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT          = 1.40   // +40%
-const INITIAL_STOP         = 0.93   // -7% hard stop
-const TRAIL_STOP_PCT       = 0.06   // 6% trail
-const MAX_HOLD_TIME        = 90000  // 90s
+const TAKE_PROFIT          = 1.40
+const INITIAL_STOP         = 0.93
+const TRAIL_STOP_PCT       = 0.06
+const MAX_HOLD_TIME        = 90000
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
@@ -116,10 +116,17 @@ async function checkCircuitBreaker(wallet) {
 }
 
 // ─── Copy wallets ─────────────────────────────────────────────────────────────
+// Wallet 1: GdRSPexh — original, +41.62% 7D
+// Wallet 2: 9Tee3dgA — Alan Sousa, +52.04% 7D, 50% WR
+// Wallet 3: FxwArENk — 95.8% WR, +$9,982 7D
+// Wallet 4: HiSo5kyk — 98.9% WR, +$9,585 7D (best WR on leaderboard)
+// Wallet 5: 4BdKaxN8 — new addition
 const COPY_WALLETS = [
   "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
   "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
+  "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn",
+  "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
 ]
 
 const BLACKLIST = new Set([
@@ -136,6 +143,8 @@ const BLACKLIST = new Set([
   "8immgrdVcwzXvSjeQBu363D6QyyLiT1pjEVYw6bonk",
   "AJwfjnjw964Z5SZPsvshJwF41EaQo2xNkKuEtHCepump",
   "6hgiPE2pVm58CA94aQsycBoL1wzXiExCzvHx2A4spump",
+  "DUWLCfcdW8G3gGBYn6bmUS9TYGScnaunhyL1kjrebonk",
+  "A9YapB8oxePgpPFeYujQRAUZGx9HZZ4RTUBPuD6pump",
 ])
 
 const positions     = new Map()
@@ -242,6 +251,25 @@ async function getTokenBalance(walletPubkey, tokenMint) {
   }
 }
 
+async function isObviouslyDead(tokenMint) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
+    if (!res.ok) return false
+    const data = await res.json()
+    if (!data || data.length === 0) return true
+    const pair = data.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0]
+    const liquidity = pair?.liquidity?.usd || 0
+    const volume5m  = pair?.volume?.m5 || 0
+    const txns5m    = (pair?.txns?.m5?.buys || 0) + (pair?.txns?.m5?.sells || 0)
+    const ageMin    = pair?.pairCreatedAt
+      ? (Date.now() - pair.pairCreatedAt) / 1000 / 60
+      : 9999
+    if (ageMin > 120) return true
+    if (liquidity === 0 && volume5m < 500 && txns5m < 5) return true
+    return false
+  } catch { return false }
+}
+
 async function checkToken(tokenMint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
@@ -271,21 +299,12 @@ async function checkToken(tokenMint) {
 
     if (BLACKLIST.has(tokenMint)) { console.log("❌ Blacklisted"); return null }
 
-    // ── FIXED LIQUIDITY CHECK ─────────────────────────────────────────────────
-    // DexScreener sometimes reports $0 liq for new/active tokens (data lag).
-    // If volume5m > 3000 and txns5m > 20, the token is clearly trading —
-    // treat liq as unindexed and allow it through. Otherwise apply hard floor.
     const hasStrongActivity = volume5m > 3000 && txns5m > 20
     if (liquidity === 0 && !hasStrongActivity) {
       console.log("❌ Zero liquidity — no activity to confirm"); return null
     }
-    if (liquidity > 0 && liquidity < 1500) {
-      console.log("❌ Liq absolute floor"); return null
-    }
-    if (liquidity > 0 && liquidity < 3000 && ageMin > 30) {
-      console.log("❌ Liq too low for age"); return null
-    }
-    // ─────────────────────────────────────────────────────────────────────────
+    if (liquidity > 0 && liquidity < 1500)                { console.log("❌ Liq absolute floor"); return null }
+    if (liquidity > 0 && liquidity < 3000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
 
     if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
@@ -499,6 +518,11 @@ async function scanCopyWallets(wallet) {
 
           for (const b of bought) {
             if (BLACKLIST.has(b.mint)) continue
+            const dead = await isObviouslyDead(b.mint)
+            if (dead) {
+              console.log(`👛 Copy wallet ${copyWallet.slice(0,8)}... skipping dead token: ${b.mint.slice(0,8)}...`)
+              continue
+            }
             console.log(`👛 Copy wallet ${copyWallet.slice(0,8)}... bought: ${b.mint}`)
             await buyToken(wallet, b.mint, "COPY_TRADE")
           }
@@ -553,9 +577,7 @@ async function scanDexScreener(wallet) {
 
     if (newRes.ok) {
       const tokens = await newRes.json()
-      const newSolana = tokens
-        .filter(t => t.chainId === "solana")
-        .slice(0, 12)
+      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 12)
       for (const t of newSolana) {
         if (t.tokenAddress) {
           await buyToken(wallet, t.tokenAddress, "NEW")
@@ -566,9 +588,7 @@ async function scanDexScreener(wallet) {
 
     if (boostRes.ok) {
       const boosted = await boostRes.json()
-      const boostedSolana = boosted
-        .filter(t => t.chainId === "solana")
-        .slice(0, 8)
+      const boostedSolana = boosted.filter(t => t.chainId === "solana").slice(0, 8)
       for (const t of boostedSolana) {
         if (t.tokenAddress) {
           await buyToken(wallet, t.tokenAddress, "BOOST")
