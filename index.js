@@ -21,34 +21,33 @@ function sleep(ms) {
   return new Promise(res => setTimeout(res, ms))
 }
 
-// ── GET 25% OF CURRENT SOL BALANCE ───────────────────────────────────────────
 async function getTradeAmount(wallet) {
   try {
     const balance = await connection.getBalance(wallet.publicKey)
     const solBalance = balance / LAMPORTS_PER_SOL
     const tradeAmount = Math.floor((solBalance * 0.25) * LAMPORTS_PER_SOL)
-    const minAmount = 10000000   // minimum 0.01 SOL
-    const maxAmount = 500000000  // maximum 0.5 SOL safety cap
+    const minAmount = 10000000
+    const maxAmount = 500000000
     const finalAmount = Math.max(minAmount, Math.min(maxAmount, tradeAmount))
     console.log(`💰 Balance: ${solBalance.toFixed(4)} SOL | Trade: ${(finalAmount/LAMPORTS_PER_SOL).toFixed(4)} SOL (25%)`)
     return finalAmount
   } catch (e) {
     console.log(`❌ Balance check failed: ${e.message}`)
-    return 20000000 // fallback 0.02 SOL
+    return 20000000
   }
 }
 
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT       = 3.0
-const INITIAL_STOP      = 0.75
-const TRAIL_STOP_PCT    = 0.12
-const MAX_HOLD_TIME     = 120000
-const DEX_SCAN_INTERVAL = 10000
+const TAKE_PROFIT        = 3.0
+const INITIAL_STOP       = 0.75
+const TRAIL_STOP_PCT     = 0.12
+const MAX_HOLD_TIME      = 120000
+const DEX_SCAN_INTERVAL  = 10000
 const PUMP_SCAN_INTERVAL = 8000
-const MAX_POSITIONS     = 2
-const MIN_SCORE         = 8
+const MAX_POSITIONS      = 2
+const MIN_SCORE          = 7
 
 const BLACKLIST = new Set([
   "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
@@ -69,7 +68,6 @@ let totalTrades = 0
 let winTrades = 0
 let totalPnl = 0
 
-// ── SWAP ──────────────────────────────────────────────────────────────────────
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
     inputMint, outputMint, amount,
@@ -96,7 +94,6 @@ async function swap(wallet, inputMint, outputMint, amount) {
   return result
 }
 
-// ── GET PRICE ─────────────────────────────────────────────────────────────────
 async function getPrice(tokenMint) {
   try {
     const res = await fetch(`${BASE}/price/v2?ids=${tokenMint}`, {
@@ -108,7 +105,6 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
-// ── TOKEN CHECK ───────────────────────────────────────────────────────────────
 async function checkToken(tokenMint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
@@ -128,21 +124,21 @@ async function checkToken(tokenMint) {
     const ageMin        = pair?.pairCreatedAt
       ? (Date.now() - pair.pairCreatedAt) / 1000 / 60
       : 9999
-    const buys5m  = pair?.txns?.m5?.buys || 0
-    const sells5m = pair?.txns?.m5?.sells || 0
-    const txns5m  = buys5m + sells5m
+    const buys5m   = pair?.txns?.m5?.buys || 0
+    const sells5m  = pair?.txns?.m5?.sells || 0
+    const txns5m   = buys5m + sells5m
     const buyRatio = txns5m > 0 ? buys5m / txns5m : 0
 
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
     if (BLACKLIST.has(tokenMint))             { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 5000)                     { console.log("❌ Liq too low"); return null }
+    if (liquidity < 1000)                     { console.log("❌ Liq too low"); return null }
     if (liquidity > 150000)                   { console.log("❌ Too big"); return null }
     if (marketCap > 3000000)                  { console.log("❌ MC too high"); return null }
     if (ageMin > 120)                         { console.log("❌ Too old"); return null }
     if (ageMin < 2)                           { console.log("❌ Too new"); return null }
-    if (volume5m < 1000)                      { console.log("❌ Low vol"); return null }
-    if (txns5m < 15)                          { console.log("❌ Low txns"); return null }
+    if (volume5m < 500)                       { console.log("❌ Low vol"); return null }
+    if (txns5m < 10)                          { console.log("❌ Low txns"); return null }
     if (priceChange5m < 3)                    { console.log("❌ Not pumping"); return null }
     if (buyRatio < 0.55)                      { console.log("❌ Too many sells"); return null }
     if (ageMin > 30 && priceChange1h < 0)     { console.log("❌ Down 1h"); return null }
@@ -171,7 +167,7 @@ async function checkToken(tokenMint) {
     else if (ageMin < 30)        score += 2
     else if (ageMin < 60)        score += 1
 
-    if (liquidity > 20000 && liquidity < 80000) score += 2
+    if (liquidity > 10000 && liquidity < 80000) score += 2
 
     console.log(`⭐ Score: ${score}/18`)
     if (score < MIN_SCORE) { console.log("❌ Score too low"); return null }
@@ -183,7 +179,6 @@ async function checkToken(tokenMint) {
   }
 }
 
-// ── BUY ───────────────────────────────────────────────────────────────────────
 async function buyToken(wallet, tokenMint, source) {
   if (!tokenMint || positions.has(tokenMint)) return
   if (triedTokens.has(tokenMint)) return
@@ -198,7 +193,6 @@ async function buyToken(wallet, tokenMint, source) {
   const buyPrice = await getPrice(tokenMint)
   if (!buyPrice) { console.log(`❌ No price`); return }
 
-  // ── GET 25% OF BALANCE ──
   const tradeAmount = await getTradeAmount(wallet)
 
   try {
@@ -220,7 +214,6 @@ async function buyToken(wallet, tokenMint, source) {
   }
 }
 
-// ── MONITOR WITH TRAILING STOP ────────────────────────────────────────────────
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
@@ -266,7 +259,6 @@ async function monitorPositions(wallet) {
   }
 }
 
-// ── SCAN PUMP.FUN ─────────────────────────────────────────────────────────────
 async function scanPumpFun(wallet) {
   try {
     const res = await fetch("https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=market_cap&order=DESC&includeNsfw=false")
@@ -299,7 +291,6 @@ async function scanPumpFun(wallet) {
   }
 }
 
-// ── SCAN DEXSCREENER ──────────────────────────────────────────────────────────
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
@@ -337,7 +328,6 @@ async function scanDexScreener(wallet) {
   }
 }
 
-// ── MAIN ──────────────────────────────────────────────────────────────────────
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
