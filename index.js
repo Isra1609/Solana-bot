@@ -32,9 +32,9 @@ const CFG = {
   JUP_API_KEY:           process.env.JUP_API_KEY    || "",
 
   // Sizing
-  TRADE_PCT:             parseFloat(process.env.TRADE_PCT    || "0.05"),  // 5% of balance per trade
-  MIN_TRADE_SOL:         parseFloat(process.env.MIN_TRADE    || "0.02"),  // hard min
-  MAX_TRADE_SOL:         parseFloat(process.env.MAX_TRADE    || "0.25"),  // hard max
+  TRADE_PCT:             parseFloat(process.env.TRADE_PCT    || "0.425"), // midpoint of 35-50% range
+  MIN_TRADE_SOL:         parseFloat(process.env.MIN_TRADE    || "0.35"),  // 35% floor
+  MAX_TRADE_SOL:         parseFloat(process.env.MAX_TRADE    || "0.50"),  // 50% ceiling
   MAX_POSITIONS:         parseInt(  process.env.MAX_POS      || "1"),     // 1 open position at a time
 
   // Safety filters
