@@ -131,18 +131,18 @@ async function checkToken(tokenMint) {
 
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
-    if (BLACKLIST.has(tokenMint))             { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 1000)                     { console.log("❌ Liq too low"); return null }
-    if (liquidity > 150000)                   { console.log("❌ Too big"); return null }
-    if (marketCap > 3000000)                  { console.log("❌ MC too high"); return null }
-    if (ageMin > 120)                         { console.log("❌ Too old"); return null }
-    if (ageMin < 2)                           { console.log("❌ Too new"); return null }
-    if (volume5m < 500)                       { console.log("❌ Low vol"); return null }
-    if (txns5m < 10)                          { console.log("❌ Low txns"); return null }
-    if (priceChange5m < 3)                    { console.log("❌ Not pumping"); return null }
-    if (buyRatio < 0.55)                      { console.log("❌ Too many sells"); return null }
-    if (ageMin > 30 && priceChange1h < 0)     { console.log("❌ Down 1h"); return null }
-    if (ageMin > 60 && priceChange6h < 10)    { console.log("❌ Weak 6h"); return null }
+    if (BLACKLIST.has(tokenMint))                        { console.log("❌ Blacklisted"); return null }
+    if (liquidity < 1000 && ageMin > 25)                 { console.log("❌ Liq too low"); return null }
+    if (liquidity > 150000)                              { console.log("❌ Too big"); return null }
+    if (marketCap > 3000000)                             { console.log("❌ MC too high"); return null }
+    if (ageMin > 120)                                    { console.log("❌ Too old"); return null }
+    if (ageMin < 2)                                      { console.log("❌ Too new"); return null }
+    if (volume5m < 500)                                  { console.log("❌ Low vol"); return null }
+    if (txns5m < 10)                                     { console.log("❌ Low txns"); return null }
+    if (priceChange5m < 3)                               { console.log("❌ Not pumping"); return null }
+    if (buyRatio < 0.55)                                 { console.log("❌ Too many sells"); return null }
+    if (ageMin > 30 && priceChange1h < 0)                { console.log("❌ Down 1h"); return null }
+    if (ageMin > 60 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
 
     let score = 0
 
