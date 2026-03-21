@@ -1,10 +1,12 @@
 const fetch = require("node-fetch")
 const bs58 = require("bs58")
+const fs = require("fs")
 const {
   Keypair,
   Connection,
   VersionedTransaction,
-  LAMPORTS_PER_SOL
+  LAMPORTS_PER_SOL,
+  PublicKey
 } = require("@solana/web3.js")
 
 const connection = new Connection(
@@ -19,6 +21,51 @@ function loadWallet() {
 
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms))
+}
+
+// ── TRADE LOGGER ──────────────────────────────────────────────────────────────
+function logTrade(trade) {
+  const logFile = "/tmp/trades.csv"
+  const header = "timestamp,token,source,score,buyPrice,sellPrice,pct,result,ageMin,liquidity,marketCap,buyRatio,volume5m,holdSeconds\n"
+  const row = `${trade.timestamp},${trade.token},${trade.source},${trade.score},${trade.buyPrice},${trade.sellPrice},${trade.pct},${trade.result},${trade.ageMin},${trade.liquidity},${trade.marketCap},${trade.buyRatio},${trade.volume5m},${trade.holdSeconds}\n`
+  if (!fs.existsSync(logFile)) fs.writeFileSync(logFile, header)
+  fs.appendFileSync(logFile, row)
+  console.log(`📝 Logged to ${logFile}`)
+}
+
+function printStats() {
+  const logFile = "/tmp/trades.csv"
+  if (!fs.existsSync(logFile)) return
+  const lines = fs.readFileSync(logFile, "utf8").trim().split("\n").slice(1)
+  if (lines.length === 0) return
+
+  const trades = lines.map(l => {
+    const [timestamp,token,source,score,buyPrice,sellPrice,pct,result] = l.split(",")
+    return { source, pct: parseFloat(pct), result, score: parseInt(score) }
+  })
+
+  const wins = trades.filter(t => t.result === "WIN").length
+  const losses = trades.filter(t => t.result === "LOSS").length
+  const totalPnl = trades.reduce((sum, t) => sum + t.pct, 0)
+  const avgWin = trades.filter(t => t.result === "WIN").reduce((sum, t) => sum + t.pct, 0) / (wins || 1)
+  const avgLoss = trades.filter(t => t.result === "LOSS").reduce((sum, t) => sum + t.pct, 0) / (losses || 1)
+
+  const bySource = {}
+  trades.forEach(t => {
+    if (!bySource[t.source]) bySource[t.source] = { wins: 0, total: 0, pnl: 0 }
+    bySource[t.source].total++
+    bySource[t.source].pnl += t.pct
+    if (t.result === "WIN") bySource[t.source].wins++
+  })
+
+  console.log(`\n📊 ═══════════════ TRADE STATS ═══════════════`)
+  console.log(`Total:${trades.length} | Wins:${wins} | Losses:${losses} | WR:${((wins/trades.length)*100).toFixed(0)}%`)
+  console.log(`PnL:${totalPnl.toFixed(1)}% | AvgWin:+${avgWin.toFixed(1)}% | AvgLoss:${avgLoss.toFixed(1)}%`)
+  console.log(`By Source:`)
+  Object.entries(bySource).forEach(([src, data]) => {
+    console.log(`  ${src}: ${data.total} trades | WR:${((data.wins/data.total)*100).toFixed(0)}% | PnL:${data.pnl.toFixed(1)}%`)
+  })
+  console.log(`═════════════════════════════════════════════\n`)
 }
 
 async function getTradeAmount(wallet) {
@@ -46,8 +93,16 @@ const TRAIL_STOP_PCT     = 0.12
 const MAX_HOLD_TIME      = 120000
 const DEX_SCAN_INTERVAL  = 10000
 const PUMP_SCAN_INTERVAL = 8000
+const WALLET_SCAN_INTERVAL = 15000
 const MAX_POSITIONS      = 2
 const MIN_SCORE          = 7
+
+// ── YOUR COPY WALLETS ─────────────────────────────────────────────────────────
+const COPY_WALLETS = [
+  "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
+  "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
+  "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
+]
 
 const BLACKLIST = new Set([
   "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
@@ -64,6 +119,7 @@ const BLACKLIST = new Set([
 
 const positions = new Map()
 const triedTokens = new Set()
+const walletLastSig = new Map()
 let totalTrades = 0
 let winTrades = 0
 let totalPnl = 0
@@ -190,7 +246,6 @@ async function buyToken(wallet, tokenMint, source) {
   const check = await checkToken(tokenMint)
   if (!check) return
 
-  // Use DexScreener price first, fall back to Jupiter
   const buyPrice = parseFloat(check.pair?.priceUsd) || await getPrice(tokenMint)
   if (!buyPrice) { console.log(`❌ No price`); return }
 
@@ -208,7 +263,14 @@ async function buyToken(wallet, tokenMint, source) {
       source,
       score: check.score,
       peakPrice: buyPrice,
-      stopPrice: buyPrice * INITIAL_STOP
+      stopPrice: buyPrice * INITIAL_STOP,
+      meta: {
+        ageMin: check.ageMin,
+        liquidity: check.liquidity,
+        marketCap: check.marketCap,
+        buyRatio: check.buyRatio,
+        volume5m: check.volume5m
+      }
     })
   } catch (e) {
     console.log(`❌ Buy failed: ${e.message}`)
@@ -249,9 +311,27 @@ async function monitorPositions(wallet) {
           const tradePnl = (ratio - 1) * 100
           totalTrades++
           totalPnl += tradePnl
-          if (tradePnl > 0) winTrades++
+          const isWin = tradePnl > 0
+          if (isWin) winTrades++
           const winRate = ((winTrades / totalTrades) * 100).toFixed(0)
           console.log(`✅ Sold ${pct}% | Trades:${totalTrades} | WR:${winRate}% | PnL:${totalPnl.toFixed(1)}%`)
+
+          logTrade({
+            timestamp: new Date().toISOString(),
+            token: tokenMint,
+            source: pos.source,
+            score: pos.score,
+            buyPrice: pos.buyPrice,
+            sellPrice: currentPrice,
+            pct: parseFloat(pct),
+            result: isWin ? "WIN" : "LOSS",
+            ageMin: pos.meta?.ageMin?.toFixed(1) || 0,
+            liquidity: Math.round(pos.meta?.liquidity || 0),
+            marketCap: Math.round(pos.meta?.marketCap || 0),
+            buyRatio: pos.meta?.buyRatio?.toFixed(2) || 0,
+            volume5m: Math.round(pos.meta?.volume5m || 0),
+            holdSeconds: Math.round(elapsed / 1000)
+          })
         } catch (e) {
           console.log(`❌ Sell failed: ${e.message}`)
         }
@@ -261,6 +341,54 @@ async function monitorPositions(wallet) {
       }
     } catch (e) {
       console.log(`❌ Monitor error: ${e.message}`)
+    }
+  }
+}
+
+async function scanCopyWallets(wallet) {
+  for (const copyWallet of COPY_WALLETS) {
+    try {
+      const sigs = await connection.getSignaturesForAddress(
+        new PublicKey(copyWallet),
+        { limit: 3 }
+      )
+
+      const lastSig = walletLastSig.get(copyWallet)
+      const newSigs = lastSig
+        ? sigs.filter(s => s.signature !== lastSig).slice(0, 3)
+        : sigs.slice(0, 1)
+
+      if (sigs.length > 0) walletLastSig.set(copyWallet, sigs[0].signature)
+
+      for (const sigInfo of newSigs) {
+        try {
+          const tx = await connection.getParsedTransaction(sigInfo.signature, {
+            maxSupportedTransactionVersion: 0
+          })
+          if (!tx) continue
+
+          const preBalances  = tx.meta?.preTokenBalances || []
+          const postBalances = tx.meta?.postTokenBalances || []
+
+          const bought = postBalances.filter(post => {
+            const pre = preBalances.find(p =>
+              p.accountIndex === post.accountIndex &&
+              p.mint === post.mint
+            )
+            const preAmt  = parseFloat(pre?.uiTokenAmount?.uiAmount || 0)
+            const postAmt = parseFloat(post?.uiTokenAmount?.uiAmount || 0)
+            return postAmt > preAmt && post.mint !== SOL
+          })
+
+          for (const b of bought) {
+            if (BLACKLIST.has(b.mint)) continue
+            console.log(`👛 Copy wallet ${copyWallet.slice(0,8)}... bought: ${b.mint}`)
+            await buyToken(wallet, b.mint, "COPY_TRADE")
+          }
+        } catch (e) {}
+      }
+    } catch (e) {
+      console.log(`❌ Wallet scan error ${copyWallet.slice(0,8)}...: ${e.message}`)
     }
   }
 }
@@ -338,13 +466,16 @@ async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
   console.log(`⚙️  sizing:25% | tp:${TAKE_PROFIT}x | trail:${TRAIL_STOP_PCT*100}% | stop:${(1-INITIAL_STOP)*100}% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS}`)
+  console.log(`👛 Tracking ${COPY_WALLETS.length} copy wallets`)
 
   await scanDexScreener(wallet)
   await scanPumpFun(wallet)
+  await scanCopyWallets(wallet)
 
-  let lastDexScan  = Date.now()
-  let lastPumpScan = Date.now()
-  let lastStats    = Date.now()
+  let lastDexScan    = Date.now()
+  let lastPumpScan   = Date.now()
+  let lastWalletScan = Date.now()
+  let lastStats      = Date.now()
 
   while (true) {
     await monitorPositions(wallet)
@@ -359,10 +490,16 @@ async function runBot() {
       lastPumpScan = Date.now()
     }
 
+    if (Date.now() - lastWalletScan > WALLET_SCAN_INTERVAL) {
+      await scanCopyWallets(wallet)
+      lastWalletScan = Date.now()
+    }
+
     if (Date.now() - lastStats > 300000) {
       const wr = totalTrades > 0 ? ((winTrades/totalTrades)*100).toFixed(0) : 0
       const bal = await connection.getBalance(wallet.publicKey)
       console.log(`📈 STATS | Trades:${totalTrades} | WR:${wr}% | PnL:${totalPnl.toFixed(1)}% | Balance:${(bal/LAMPORTS_PER_SOL).toFixed(4)}SOL | Open:${positions.size}`)
+      printStats()
       lastStats = Date.now()
     }
 
