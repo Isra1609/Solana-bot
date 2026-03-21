@@ -131,9 +131,10 @@ const BLACKLIST = new Set([
   "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk",
   "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
   "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
-  // tokens that rugged you today
+  // rugged today — never touch again
   "8immgrdVcwzXvSjeQBu363D6QyyLiT1pjEVYw6bonk",
   "AJwfjnjw964Z5SZPsvshJwF41EaQo2xNkKuEtHCepump",
+  "6hgiPE2pVm58CA94aQsycBoL1wzXiExCzvHx2A4spump",
 ])
 
 const positions     = new Map()
@@ -216,7 +217,7 @@ async function isRug(tokenMint) {
     const hasDanger = dangerFlags.some(f => hardReject.some(h => f.includes(h)))
 
     if (hasDanger) { console.log(`🚨 Rug danger: ${dangerFlags.join(", ")}`); return true }
-    if (score < 300) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
+    if (score < 400) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
     if (warnFlags.length >= 3) { console.log(`⚠️  Too many warn flags (${warnFlags.length})`); return true }
 
     console.log(`✅ Rugcheck OK | Score:${score} | Warns:${warnFlags.length}`)
