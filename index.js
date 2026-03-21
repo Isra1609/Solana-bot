@@ -22,26 +22,24 @@ function sleep(ms) {
 
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
-const BUY_AMOUNT = 20000000       // 0.02 SOL per trade
-const TAKE_PROFIT = 2.0           // sell at 2x
-const STOP_LOSS = 0.6             // sell at -40%
-const MAX_HOLD_TIME = 90000       // force sell after 90s
-const DEX_SCAN_INTERVAL = 20000   // scan every 20s
+const BUY_AMOUNT = 20000000
+const TAKE_PROFIT = 2.0
+const STOP_LOSS = 0.6
+const MAX_HOLD_TIME = 90000
+const DEX_SCAN_INTERVAL = 20000
 
-// ── BLACKLIST big/known tokens ─────────────────────────────────────────────────
 const BLACKLIST = new Set([
-  "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", // BONK
-  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
-  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", // ETH (wrapped)
-  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  // mSOL
-  "So11111111111111111111111111111111111111112",     // SOL
+  "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
+  "So11111111111111111111111111111111111111112",
 ])
 
 const positions = new Map()
 const triedTokens = new Set()
 
-// ── SWAP ──────────────────────────────────────────────────────────────────────
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
     inputMint, outputMint, amount,
@@ -68,7 +66,6 @@ async function swap(wallet, inputMint, outputMint, amount) {
   return result
 }
 
-// ── GET PRICE ─────────────────────────────────────────────────────────────────
 async function getPrice(tokenMint) {
   try {
     const res = await fetch(`${BASE}/price/v2?ids=${tokenMint}`, {
@@ -80,7 +77,6 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
-// ── SAFETY + QUALITY CHECK ────────────────────────────────────────────────────
 async function checkToken(tokenMint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
@@ -90,7 +86,6 @@ async function checkToken(tokenMint) {
 
     const pair = data[0]
     const liquidity = pair?.liquidity?.usd || 0
-    const volume1h = pair?.volume?.h1 || 0
     const volume5m = pair?.volume?.m5 || 0
     const priceChange5m = pair?.priceChange?.m5 || 0
     const priceChange1h = pair?.priceChange?.h1 || 0
@@ -102,18 +97,18 @@ async function checkToken(tokenMint) {
 
     console.log(`🔎 Liq: $${Math.round(liquidity)} | FDV: $${Math.round(fdv)} | Age: ${ageMin.toFixed(0)}min | 5m: ${priceChange5m}% | Vol5m: $${Math.round(volume5m)} | Txns5m: ${txns5m}`)
 
-    // ── REJECT conditions ──
     if (BLACKLIST.has(tokenMint)) { console.log("❌ Blacklisted"); return null }
     if (liquidity < 3000) { console.log("❌ Liquidity too low"); return null }
-    if (liquidity > 200000) { console.log("❌ Too big — no room to run"); return null }
-    if (fdv > 5000000) { console.log("❌ FDV too high (>$5M)"); return null }
-    if (ageMin > 180) { console.log("❌ Token too old (>3hrs)"); return null }
+    if (liquidity > 200000) { console.log("❌ Too big"); return null }
+    if (fdv > 5000000) { console.log("❌ FDV too high"); return null }
+    if (ageMin > 180) { console.log("❌ Token too old"); return null }
     if (volume5m < 500) { console.log("❌ Not enough 5m volume"); return null }
     if (txns5m < 10) { console.log("❌ Not enough transactions"); return null }
     if (priceChange5m < 2) { console.log("❌ Not pumping fast enough"); return null }
-    if (priceChange1h < 0) { console.log("❌ Down on 1h — avoid"); return null }
 
-    // ── SCORE the setup ──
+    // Only apply 1h filter if token is older than 30 min
+    if (ageMin > 30 && priceChange1h < 0) { console.log("❌ Down on 1h — avoid"); return null }
+
     let score = 0
     if (priceChange5m > 10) score += 3
     else if (priceChange5m > 5) score += 2
@@ -127,7 +122,7 @@ async function checkToken(tokenMint) {
     else if (txns5m > 20) score += 1
 
     if (liquidity > 20000) score += 2
-    if (ageMin < 30) score += 2  // very fresh bonus
+    if (ageMin < 30) score += 2
 
     console.log(`⭐ Score: ${score}/12`)
     if (score < 5) { console.log("❌ Score too low"); return null }
@@ -139,7 +134,6 @@ async function checkToken(tokenMint) {
   }
 }
 
-// ── BUY ───────────────────────────────────────────────────────────────────────
 async function buyToken(wallet, tokenMint, source) {
   if (!tokenMint || positions.has(tokenMint)) return
   if (triedTokens.has(tokenMint)) return
@@ -164,7 +158,6 @@ async function buyToken(wallet, tokenMint, source) {
   }
 }
 
-// ── MONITOR ───────────────────────────────────────────────────────────────────
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
@@ -191,12 +184,10 @@ async function monitorPositions(wallet) {
   }
 }
 
-// ── SCAN DEXSCREENER ──────────────────────────────────────────────────────────
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning...")
 
-    // Boosted tokens
     const boostRes = await fetch("https://api.dexscreener.com/token-boosts/top/v1")
     if (boostRes.ok) {
       const tokens = await boostRes.json()
@@ -209,7 +200,6 @@ async function scanDexScreener(wallet) {
       }
     }
 
-    // Latest new tokens
     const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
     if (newRes.ok) {
       const tokens = await newRes.json()
@@ -226,7 +216,6 @@ async function scanDexScreener(wallet) {
   }
 }
 
-// ── MAIN ──────────────────────────────────────────────────────────────────────
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
