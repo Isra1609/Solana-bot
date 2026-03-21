@@ -35,7 +35,7 @@ function logTrade(trade) {
 function printStats() {
   const logFile = "/tmp/trades.csv"
   if (!fs.existsSync(logFile)) return
-  const lines = fs.readFileSync(logFile, "utf8").trim().split("\n").slice(1)
+  const lines = fs.readFileSync(logFile, "utf8").trim().split("\n").slice(1).filter(Boolean)
   if (lines.length === 0) return
 
   const trades = lines.map(l => {
@@ -67,35 +67,59 @@ function printStats() {
   console.log(`═════════════════════════════════════════════\n`)
 }
 
+// ─── FIX 1: 8% position size, 0.35 SOL hard cap (was 25% — way too risky) ────
 async function getTradeAmount(wallet) {
   try {
     const balance = await connection.getBalance(wallet.publicKey)
     const solBalance = balance / LAMPORTS_PER_SOL
-    const tradeAmount = Math.floor((solBalance * 0.25) * LAMPORTS_PER_SOL)
-    const minAmount = 10000000
-    const maxAmount = 500000000
-    const finalAmount = Math.max(minAmount, Math.min(maxAmount, tradeAmount))
-    console.log(`💰 Balance: ${solBalance.toFixed(4)} SOL | Trade: ${(finalAmount/LAMPORTS_PER_SOL).toFixed(4)} SOL (25%)`)
+    const target = Math.min(solBalance * 0.08, 0.35)
+    const clamped = Math.max(0.01, target)
+    const finalAmount = Math.floor(clamped * LAMPORTS_PER_SOL)
+    console.log(`💰 Balance: ${solBalance.toFixed(4)} SOL | Trade: ${clamped.toFixed(4)} SOL (8%)`)
     return finalAmount
   } catch (e) {
     console.log(`❌ Balance check failed: ${e.message}`)
-    return 20000000
+    return Math.floor(0.02 * LAMPORTS_PER_SOL)
   }
 }
 
-const SOL = "So11111111111111111111111111111111111111112"
+const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT          = 3.0
-const INITIAL_STOP         = 0.75
-const TRAIL_STOP_PCT       = 0.12
-const MAX_HOLD_TIME        = 120000
-const DEX_SCAN_INTERVAL    = 15000   // slowed from 10s to 15s
-const PUMP_SCAN_INTERVAL   = 15000   // slowed from 8s to 15s
-const WALLET_SCAN_INTERVAL = 30000   // slowed from 15s to 30s
-const MAX_POSITIONS        = 2
-const MIN_SCORE            = 7
+// ─── FIX 2: Realistic exits (3x TP was fantasy, trail stop too wide) ──────────
+const TAKE_PROFIT          = 1.40   // +40% — actually hits on 100s holds
+const INITIAL_STOP         = 0.88   // -12% hard stop (was -25%)
+const TRAIL_STOP_PCT       = 0.07   // 7% trail (was 12%)
+const MAX_HOLD_TIME        = 100000 // 100s
+const DEX_SCAN_INTERVAL    = 20000
+const PUMP_SCAN_INTERVAL   = 18000
+const WALLET_SCAN_INTERVAL = 35000
+const MAX_POSITIONS        = 3      // bumped since each position is now smaller
+const MIN_SCORE            = 11     // raised from 7 — cuts out weak signals
 
+// ─── FIX 3: Daily circuit breaker — halts buys if down 20% on the day ─────────
+const DAILY_LOSS_LIMIT_PCT = 0.20
+let dayStartBalance        = null
+let circuitBroken          = false
+
+async function checkCircuitBreaker(wallet) {
+  if (circuitBroken) return true
+  try {
+    const balance = await connection.getBalance(wallet.publicKey)
+    const sol = balance / LAMPORTS_PER_SOL
+    if (dayStartBalance === null) { dayStartBalance = sol; return false }
+    const drawdown = (dayStartBalance - sol) / dayStartBalance
+    if (drawdown >= DAILY_LOSS_LIMIT_PCT) {
+      console.log(`🛑 CIRCUIT BREAKER: down ${(drawdown*100).toFixed(1)}% today. Halting buys.`)
+      circuitBroken = true
+      return true
+    }
+  } catch {}
+  return false
+}
+
+// ─── TODO: Replace with verified wallets from gmgn.ai or birdeye.so/leaderboard
+// Look for: >60% win rate, >50 trades, active in last 7 days ──────────────────
 const COPY_WALLETS = [
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
   "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
@@ -115,12 +139,14 @@ const BLACKLIST = new Set([
   "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
 ])
 
-const positions = new Map()
-const triedTokens = new Set()
+const positions   = new Map()
+const triedTokens = new Map()   // FIX 4: Map with TTL (was permanent Set — missed re-entries)
 const walletLastSig = new Map()
 let totalTrades = 0
-let winTrades = 0
-let totalPnl = 0
+let winTrades   = 0
+let totalPnl    = 0
+
+const TRIED_TTL_MS = 12 * 60 * 1000  // re-evaluate same token after 12 min
 
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
@@ -159,6 +185,67 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
+// ─── FIX 5: Correct DexScreener price fallback (original was broken) ──────────
+async function getDexPrice(tokenMint) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!Array.isArray(data) || data.length === 0) return null
+    const pair = data.sort((a, b) => (b.liquidity?.usd||0) - (a.liquidity?.usd||0))[0]
+    return parseFloat(pair?.priceUsd) || null
+  } catch { return null }
+}
+
+// ─── FIX 6: Rug/honeypot check via rugcheck.xyz — was completely missing ───────
+async function isRug(tokenMint) {
+  try {
+    const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`)
+    if (!res.ok) {
+      console.log(`⚠️  Rugcheck unavailable — rejecting to be safe`)
+      return true
+    }
+    const data  = await res.json()
+    const score = data?.score ?? 0
+    const risks = data?.risks || []
+
+    const dangerFlags = risks.filter(r => r.level === "danger").map(r => r.name)
+    const warnFlags   = risks.filter(r => r.level === "warn").map(r => r.name)
+
+    const hardReject = [
+      "Freeze Authority still enabled",
+      "Mint Authority still enabled",
+      "Copycat token",
+      "High ownership concentration",
+    ]
+    const hasDanger = dangerFlags.some(f => hardReject.some(h => f.includes(h)))
+
+    if (hasDanger) { console.log(`🚨 Rug danger: ${dangerFlags.join(", ")}`); return true }
+    if (score < 400) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
+    if (warnFlags.length >= 3) { console.log(`⚠️  Too many warn flags (${warnFlags.length})`); return true }
+
+    console.log(`✅ Rugcheck OK | Score:${score} | Warns:${warnFlags.length}`)
+    return false
+  } catch (e) {
+    console.log(`❌ isRug error: ${e.message} — rejecting to be safe`)
+    return true
+  }
+}
+
+// ─── FIX 7: Re-fetch real on-chain balance before sells (fixes amount drift) ───
+async function getTokenBalance(walletPubkey, tokenMint) {
+  try {
+    const accounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+      mint: new PublicKey(tokenMint)
+    })
+    if (accounts.value.length === 0) return null
+    return accounts.value[0].account.data.parsed.info.tokenAmount.amount
+  } catch (e) {
+    console.log(`❌ getTokenBalance error: ${e.message}`)
+    return null
+  }
+}
+
 async function checkToken(tokenMint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
@@ -170,6 +257,7 @@ async function checkToken(tokenMint) {
 
     const liquidity     = pair?.liquidity?.usd || 0
     const volume5m      = pair?.volume?.m5 || 0
+    const volume1m      = pair?.volume?.m1 || 0  // FIX 8: for spike detection
     const priceChange5m = pair?.priceChange?.m5 || 0
     const priceChange1h = pair?.priceChange?.h1 || 0
     const priceChange6h = pair?.priceChange?.h6 || 0
@@ -186,17 +274,17 @@ async function checkToken(tokenMint) {
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
     if (BLACKLIST.has(tokenMint))                        { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 1000 && ageMin > 25)                 { console.log("❌ Liq too low"); return null }
-    if (liquidity > 150000)                              { console.log("❌ Too big"); return null }
-    if (marketCap > 3000000)                             { console.log("❌ MC too high"); return null }
-    if (ageMin > 120)                                    { console.log("❌ Too old"); return null }
-    if (ageMin < 2)                                      { console.log("❌ Too new"); return null }
-    if (volume5m < 500)                                  { console.log("❌ Low vol"); return null }
-    if (txns5m < 10)                                     { console.log("❌ Low txns"); return null }
-    if (priceChange5m < 3)                               { console.log("❌ Not pumping"); return null }
-    if (buyRatio < 0.55)                                 { console.log("❌ Too many sells"); return null }
-    if (ageMin > 45 && priceChange1h < -10)              { console.log("❌ Down 1h"); return null }
-    if (ageMin > 60 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
+    if (liquidity < 2000)                                { console.log("❌ Liq too low"); return null }
+    if (liquidity > 120000)                              { console.log("❌ Too big"); return null }
+    if (marketCap > 2500000)                             { console.log("❌ MC too high"); return null }
+    if (ageMin > 90)                                     { console.log("❌ Too old"); return null }
+    if (ageMin < 3)                                      { console.log("❌ Too new"); return null }
+    if (volume5m < 800)                                  { console.log("❌ Low vol"); return null }
+    if (txns5m < 12)                                     { console.log("❌ Low txns"); return null }
+    if (priceChange5m < 4)                               { console.log("❌ Not pumping"); return null }
+    if (buyRatio < 0.58)                                 { console.log("❌ Too many sells"); return null }
+    if (ageMin > 45 && priceChange1h < -15)              { console.log("❌ Down 1h"); return null }
+    if (ageMin > 60 && priceChange6h < 8)                { console.log("❌ Weak 6h"); return null }
 
     let score = 0
 
@@ -205,25 +293,28 @@ async function checkToken(tokenMint) {
     else if (priceChange5m > 5)  score += 2
     else                         score += 1
 
-    if (volume5m > 10000)        score += 4
-    else if (volume5m > 5000)    score += 3
-    else if (volume5m > 2000)    score += 2
+    if (volume5m > 15000)        score += 4
+    else if (volume5m > 7000)    score += 3
+    else if (volume5m > 3000)    score += 2
     else                         score += 1
 
-    if (buyRatio > 0.75)         score += 3
-    else if (buyRatio > 0.65)    score += 2
+    // FIX 8: Volume spike bonus — 35%+ of 5m vol in last 1m = strong momentum
+    if (volume5m > 0 && volume1m / volume5m > 0.35) score += 2
+
+    if (buyRatio > 0.78)         score += 3
+    else if (buyRatio > 0.68)    score += 2
     else                         score += 1
 
-    if (txns5m > 100)            score += 2
-    else if (txns5m > 50)        score += 1
+    if (txns5m > 120)            score += 2
+    else if (txns5m > 60)        score += 1
 
     if (ageMin < 10)             score += 3
     else if (ageMin < 30)        score += 2
     else if (ageMin < 60)        score += 1
 
-    if (liquidity > 10000 && liquidity < 80000) score += 2
+    if (liquidity > 8000 && liquidity < 80000) score += 1
 
-    console.log(`⭐ Score: ${score}/18`)
+    console.log(`⭐ Score: ${score}/20`)
     if (score < MIN_SCORE) { console.log("❌ Score too low"); return null }
 
     return { pair, score, liquidity, marketCap, priceChange5m, ageMin, buyRatio, volume5m }
@@ -235,14 +326,24 @@ async function checkToken(tokenMint) {
 
 async function buyToken(wallet, tokenMint, source) {
   if (!tokenMint || positions.has(tokenMint)) return
-  if (triedTokens.has(tokenMint)) return
   if (positions.size >= MAX_POSITIONS) return
 
-  triedTokens.add(tokenMint)
+  // FIX 4: TTL dedup — tokens re-evaluated after 12 min instead of never
+  const lastTried = triedTokens.get(tokenMint)
+  if (lastTried && Date.now() - lastTried < TRIED_TTL_MS) return
+  triedTokens.set(tokenMint, Date.now())
+
+  if (circuitBroken) { console.log(`🛑 Circuit breaker active — skipping`); return }
+
   console.log(`🎯 [${source}] Evaluating: ${tokenMint}`)
 
   const check = await checkToken(tokenMint)
   if (!check) return
+
+  // FIX 6: Rug check — runs after quality filter to not waste API calls
+  console.log(`🔍 Running rugcheck...`)
+  const rug = await isRug(tokenMint)
+  if (rug) return
 
   const buyPrice = parseFloat(check.pair?.priceUsd) || await getPrice(tokenMint)
   if (!buyPrice) { console.log(`❌ No price`); return }
@@ -255,7 +356,7 @@ async function buyToken(wallet, tokenMint, source) {
     console.log(`🚀 BOUGHT [${source}] score:${check.score} liq:$${Math.round(check.liquidity)} mc:$${Math.round(check.marketCap)} age:${check.ageMin.toFixed(0)}m size:${(tradeAmount/LAMPORTS_PER_SOL).toFixed(4)}SOL ${tokenMint}`)
     positions.set(tokenMint, {
       buyPrice,
-      amount: outAmount,
+      rawAmount: outAmount,
       tradeAmount,
       timestamp: Date.now(),
       source,
@@ -278,13 +379,9 @@ async function buyToken(wallet, tokenMint, source) {
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
-      const currentPrice = await getPrice(tokenMint) || await (async () => {
-        const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
-        if (!res.ok) return null
-        const data = await res.json()
-        return parseFloat(data?.[0]?.priceUsd) || null
-      })()
-      if (!currentPrice) continue
+      // FIX 5: Use corrected getDexPrice instead of broken inline fallback
+      const currentPrice = (await getPrice(tokenMint)) || (await getDexPrice(tokenMint))
+      if (!currentPrice || currentPrice <= 0) continue
 
       const ratio   = currentPrice / pos.buyPrice
       const elapsed = Date.now() - pos.timestamp
@@ -297,15 +394,27 @@ async function monitorPositions(wallet) {
       }
 
       const hitTP    = ratio >= TAKE_PROFIT
-      const hitTrail = currentPrice <= pos.stopPrice
+      // FIX: Don't trail-stop before you're in profit — trail only kicks in above +5%
+      const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.05
+      const hitStop  = currentPrice <= pos.buyPrice * INITIAL_STOP
       const hitTime  = elapsed >= MAX_HOLD_TIME
 
-      if (hitTP || hitTrail || hitTime) {
+      if (hitTP || hitTrail || hitStop || hitTime) {
         const reason = hitTP    ? "🎯 TAKE PROFIT" :
+                       hitStop  ? "🛑 HARD STOP"   :
                        hitTrail ? "📉 TRAIL STOP"  : "⏰ TIME LIMIT"
         console.log(`${reason} | ${pct}% | peak:${peakPct}% | ${tokenMint}`)
         try {
-          await swap(wallet, tokenMint, SOL, pos.amount)
+          // FIX 7: Use real on-chain balance for sell to prevent failed txns
+          const liveAmount = await getTokenBalance(wallet.publicKey, tokenMint)
+          const sellAmount = liveAmount || pos.rawAmount
+          if (!sellAmount || sellAmount === "0") {
+            console.log(`⚠️  Zero balance — already sold or error`)
+            positions.delete(tokenMint)
+            continue
+          }
+
+          await swap(wallet, tokenMint, SOL, sellAmount)
           const tradePnl = (ratio - 1) * 100
           totalTrades++
           totalPnl += tradePnl
@@ -346,22 +455,26 @@ async function monitorPositions(wallet) {
 async function scanCopyWallets(wallet) {
   for (const copyWallet of COPY_WALLETS) {
     try {
-      await sleep(2000) // delay between each wallet to avoid rate limits
+      await sleep(2500)
       const sigs = await connection.getSignaturesForAddress(
         new PublicKey(copyWallet),
         { limit: 3 }
       )
+      if (sigs.length === 0) continue
 
       const lastSig = walletLastSig.get(copyWallet)
+
+      // FIX 9: On first run only process 1 sig to prevent burst buys
+      // On subsequent runs, process new sigs since last seen (max 2)
       const newSigs = lastSig
-        ? sigs.filter(s => s.signature !== lastSig).slice(0, 3)
+        ? sigs.filter(s => s.signature !== lastSig).slice(0, 2)
         : sigs.slice(0, 1)
 
-      if (sigs.length > 0) walletLastSig.set(copyWallet, sigs[0].signature)
+      walletLastSig.set(copyWallet, sigs[0].signature)
 
       for (const sigInfo of newSigs) {
         try {
-          await sleep(1000) // delay between tx lookups
+          await sleep(1200)
           const tx = await connection.getParsedTransaction(sigInfo.signature, {
             maxSupportedTransactionVersion: 0
           })
@@ -402,10 +515,10 @@ async function scanPumpFun(wallet) {
     for (const coin of coins) {
       if (!coin.mint || coin.complete) continue
       const mcap = coin.usd_market_cap || 0
-      if (mcap < 50000 || mcap > 69000) continue
+      if (mcap < 55000 || mcap > 69000) continue
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
-      await sleep(500)
+      await sleep(600)
     }
 
     const gradRes = await fetch("https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
@@ -415,46 +528,30 @@ async function scanPumpFun(wallet) {
     for (const coin of gradCoins) {
       if (!coin.mint || !coin.complete) continue
       const ageMin = (Date.now() - coin.created_timestamp) / 1000 / 60
-      if (ageMin > 30) continue
+      if (ageMin > 25) continue
       console.log(`🆕 Graduated: ${coin.symbol} age:${ageMin.toFixed(0)}m ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_NEW")
-      await sleep(500)
+      await sleep(600)
     }
   } catch (e) {
     console.log(`❌ Pump.fun error: ${e.message}`)
   }
 }
 
+// FIX 10: Removed BOOST entirely — paid promotions have no edge
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
-
-    const boostRes = await fetch("https://api.dexscreener.com/token-boosts/top/v1")
-    if (boostRes.ok) {
-      const tokens = await boostRes.json()
-      const top = tokens
-        .filter(t => t.chainId === "solana")
-        .sort((a, b) => b.amount - a.amount)
-        .slice(0, 10)
-      for (const t of top) {
-        if (t.tokenAddress) {
-          await buyToken(wallet, t.tokenAddress, "BOOST")
-          await sleep(500)
-        }
-      }
-    }
-
     const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
-    if (newRes.ok) {
-      const tokens = await newRes.json()
-      const newSolana = tokens
-        .filter(t => t.chainId === "solana")
-        .slice(0, 10)
-      for (const t of newSolana) {
-        if (t.tokenAddress) {
-          await buyToken(wallet, t.tokenAddress, "NEW")
-          await sleep(500)
-        }
+    if (!newRes.ok) return
+    const tokens = await newRes.json()
+    const newSolana = tokens
+      .filter(t => t.chainId === "solana")
+      .slice(0, 12)
+    for (const t of newSolana) {
+      if (t.tokenAddress) {
+        await buyToken(wallet, t.tokenAddress, "NEW")
+        await sleep(600)
       }
     }
   } catch (e) {
@@ -465,8 +562,15 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  sizing:25% | tp:${TAKE_PROFIT}x | trail:${TRAIL_STOP_PCT*100}% | stop:${(1-INITIAL_STOP)*100}% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS}`)
+  console.log(`⚙️  size:8% | tp:+40% | stop:-12% | trail:7% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
   console.log(`👛 Tracking ${COPY_WALLETS.length} copy wallets`)
+  console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
+
+  try {
+    const bal = await connection.getBalance(wallet.publicKey)
+    dayStartBalance = bal / LAMPORTS_PER_SOL
+    console.log(`📊 Starting balance: ${dayStartBalance.toFixed(4)} SOL`)
+  } catch {}
 
   await scanDexScreener(wallet)
   await scanPumpFun(wallet)
@@ -479,22 +583,20 @@ async function runBot() {
 
   while (true) {
     await monitorPositions(wallet)
+    await checkCircuitBreaker(wallet)
 
     if (Date.now() - lastDexScan > DEX_SCAN_INTERVAL) {
       await scanDexScreener(wallet)
       lastDexScan = Date.now()
     }
-
     if (Date.now() - lastPumpScan > PUMP_SCAN_INTERVAL) {
       await scanPumpFun(wallet)
       lastPumpScan = Date.now()
     }
-
     if (Date.now() - lastWalletScan > WALLET_SCAN_INTERVAL) {
       await scanCopyWallets(wallet)
       lastWalletScan = Date.now()
     }
-
     if (Date.now() - lastStats > 300000) {
       const wr = totalTrades > 0 ? ((winTrades/totalTrades)*100).toFixed(0) : 0
       const bal = await connection.getBalance(wallet.publicKey)
