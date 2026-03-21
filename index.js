@@ -268,8 +268,13 @@ async function checkToken(tokenMint) {
 
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
-    if (BLACKLIST.has(tokenMint))                        { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 3000 && ageMin > 30)                 { console.log("❌ Liq too low"); return null }
+    // ── FIX 1: Hard-reject zero/missing liquidity before anything else ─────────
+    if (BLACKLIST.has(tokenMint))        { console.log("❌ Blacklisted"); return null }
+    if (liquidity === 0)                 { console.log("❌ Zero liquidity — drained or unindexed"); return null }
+    if (liquidity < 1500)                { console.log("❌ Liq absolute floor"); return null }
+    if (liquidity < 3000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
+    // ──────────────────────────────────────────────────────────────────────────
+
     if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
     if (ageMin > 60)                                     { console.log("❌ Too old"); return null }
@@ -502,7 +507,8 @@ async function scanPumpFun(wallet) {
     for (const coin of coins) {
       if (!coin.mint || coin.complete) continue
       const mcap = coin.usd_market_cap || 0
-      if (mcap < 55000 || mcap > 69000) continue
+      // FIX 2: Widened graduation window 55K–69K → 50K–75K to catch fast-spiking grads
+      if (mcap < 50000 || mcap > 75000) continue
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
       await sleep(600)
@@ -528,16 +534,36 @@ async function scanPumpFun(wallet) {
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
-    const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
-    if (!newRes.ok) return
-    const tokens = await newRes.json()
-    const newSolana = tokens
-      .filter(t => t.chainId === "solana")
-      .slice(0, 12)
-    for (const t of newSolana) {
-      if (t.tokenAddress) {
-        await buyToken(wallet, t.tokenAddress, "NEW")
-        await sleep(600)
+
+    // FIX 3: Scan both latest profiles AND top boosted tokens in parallel
+    const [newRes, boostRes] = await Promise.all([
+      fetch("https://api.dexscreener.com/token-profiles/latest/v1"),
+      fetch("https://api.dexscreener.com/token-boosts/top/v1")
+    ])
+
+    if (newRes.ok) {
+      const tokens = await newRes.json()
+      const newSolana = tokens
+        .filter(t => t.chainId === "solana")
+        .slice(0, 12)
+      for (const t of newSolana) {
+        if (t.tokenAddress) {
+          await buyToken(wallet, t.tokenAddress, "NEW")
+          await sleep(600)
+        }
+      }
+    }
+
+    if (boostRes.ok) {
+      const boosted = await boostRes.json()
+      const boostedSolana = boosted
+        .filter(t => t.chainId === "solana")
+        .slice(0, 8)
+      for (const t of boostedSolana) {
+        if (t.tokenAddress) {
+          await buyToken(wallet, t.tokenAddress, "BOOST")
+          await sleep(600)
+        }
       }
     }
   } catch (e) {
@@ -548,8 +574,8 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  size:8% | tp:+40% | stop:-8% | trail:7% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
-  console.log(`👛 Copy wallets: ${COPY_WALLETS.length} (disabled — add verified wallets from gmgn.ai)`)
+  console.log(`⚙️  size:8% | tp:+40% | stop:-7% | trail:6% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
+  console.log(`👛 Copy wallets: ${COPY_WALLETS.length}`)
   console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
 
   try {
