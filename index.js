@@ -85,10 +85,19 @@ async function getTradeAmount(wallet) {
 const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT          = 1.40   // +40% TP unchanged
-const INITIAL_STOP         = 0.85   // -15% hard stop (was -7%, giving more room)
-const TRAIL_STOP_PCT       = 0.10   // 10% trail (was 6%, wider to ride pumps)
-const MAX_HOLD_TIME        = 180000 // 3 min (was 90s, doubled to let winners run)
+// ─── 3 Take Profit levels — sell 1/3 of position at each ─────────────────────
+// TP1: +20% → sell 33% (lock in quick profit)
+// TP2: +40% → sell 33% (solid gain)
+// TP3: +100% → sell remaining (moon bag)
+const TP1_RATIO   = 1.20
+const TP2_RATIO   = 1.40
+const TP3_RATIO   = 2.00
+const TP_FRACTION = 0.34  // ~1/3 each time (slight rounding buffer)
+
+const INITIAL_STOP   = 0.85   // -15% hard stop
+const TRAIL_STOP_PCT = 0.10   // 10% trail
+const MAX_HOLD_TIME  = 900000 // 15 minutes
+
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
@@ -386,6 +395,9 @@ async function buyToken(wallet, tokenMint, source) {
       score: check.score,
       peakPrice: buyPrice,
       stopPrice: buyPrice * INITIAL_STOP,
+      // Track which TPs have been hit
+      tp1Hit: false,
+      tp2Hit: false,
       meta: {
         ageMin: check.ageMin,
         liquidity: check.liquidity,
@@ -415,15 +427,51 @@ async function monitorPositions(wallet) {
         pos.stopPrice = currentPrice * (1 - TRAIL_STOP_PCT)
       }
 
-      const hitTP    = ratio >= TAKE_PROFIT
-      const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.10
       const hitStop  = currentPrice <= pos.buyPrice * INITIAL_STOP
+      const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.10
       const hitTime  = elapsed >= MAX_HOLD_TIME
 
-      if (hitTP || hitTrail || hitStop || hitTime) {
-        const reason = hitTP    ? "🎯 TAKE PROFIT" :
-                       hitStop  ? "🛑 HARD STOP"   :
-                       hitTrail ? "📉 TRAIL STOP"  : "⏰ TIME LIMIT"
+      // ── Partial TP sells ────────────────────────────────────────────────────
+      // TP1: hit +20% → sell 1/3
+      if (!pos.tp1Hit && ratio >= TP1_RATIO) {
+        pos.tp1Hit = true
+        try {
+          const liveAmount = await getTokenBalance(wallet.publicKey, tokenMint)
+          const totalAmt = liveAmount || pos.rawAmount
+          if (totalAmt && totalAmt !== "0") {
+            const sellAmt = Math.floor(BigInt(totalAmt) * BigInt(Math.floor(TP_FRACTION * 100)) / 100n).toString()
+            if (BigInt(sellAmt) > 0n) {
+              await swap(wallet, tokenMint, SOL, sellAmt)
+              console.log(`🎯 TP1 +20% | Sold 1/3 | ${tokenMint.slice(0,8)}...`)
+            }
+          }
+        } catch (e) { console.log(`❌ TP1 sell failed: ${e.message}`) }
+      }
+
+      // TP2: hit +40% → sell another 1/3
+      if (pos.tp1Hit && !pos.tp2Hit && ratio >= TP2_RATIO) {
+        pos.tp2Hit = true
+        try {
+          const liveAmount = await getTokenBalance(wallet.publicKey, tokenMint)
+          const totalAmt = liveAmount || pos.rawAmount
+          if (totalAmt && totalAmt !== "0") {
+            const sellAmt = Math.floor(BigInt(totalAmt) * BigInt(Math.floor(TP_FRACTION * 100)) / 100n).toString()
+            if (BigInt(sellAmt) > 0n) {
+              await swap(wallet, tokenMint, SOL, sellAmt)
+              console.log(`🎯 TP2 +40% | Sold 1/3 | ${tokenMint.slice(0,8)}...`)
+            }
+          }
+        } catch (e) { console.log(`❌ TP2 sell failed: ${e.message}`) }
+      }
+      // ───────────────────────────────────────────────────────────────────────
+
+      // Full exit conditions
+      const hitTP3 = pos.tp2Hit && ratio >= TP3_RATIO
+
+      if (hitTP3 || hitTrail || hitStop || hitTime) {
+        const reason = hitTP3   ? "🎯 TP3 +100%"  :
+                       hitStop  ? "🛑 HARD STOP"  :
+                       hitTrail ? "📉 TRAIL STOP" : "⏰ TIME LIMIT"
         console.log(`${reason} | ${pct}% | peak:${peakPct}% | ${tokenMint}`)
         try {
           const liveAmount = await getTokenBalance(wallet.publicKey, tokenMint)
@@ -464,7 +512,9 @@ async function monitorPositions(wallet) {
         }
         positions.delete(tokenMint)
       } else {
-        console.log(`📊 ${tokenMint.slice(0,8)}... | ${pct}% | peak:${peakPct}% | stop:${(((pos.stopPrice/pos.buyPrice)-1)*100).toFixed(1)}% | ${Math.floor(elapsed/1000)}s`)
+        const tp1 = pos.tp1Hit ? "✅" : `@+20%`
+        const tp2 = pos.tp2Hit ? "✅" : `@+40%`
+        console.log(`📊 ${tokenMint.slice(0,8)}... | ${pct}% | peak:${peakPct}% | stop:${(((pos.stopPrice/pos.buyPrice)-1)*100).toFixed(1)}% | TP1:${tp1} TP2:${tp2} | ${Math.floor(elapsed/1000)}s`)
       }
     } catch (e) {
       console.log(`❌ Monitor error: ${e.message}`)
@@ -577,7 +627,6 @@ async function scanDexScreener(wallet) {
       }
     }
 
-    // Trending fresh Solana pairs — under 60 min, pumping, high volume
     const trendRes = await fetch("https://api.dexscreener.com/latest/dex/search?q=solana")
     if (trendRes.ok) {
       const trendData = await trendRes.json()
@@ -607,7 +656,7 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  size:8% | tp:+40% | stop:-15% | trail:10% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
+  console.log(`⚙️  size:8% | TP1:+20% TP2:+40% TP3:+100% | stop:-15% | trail:10% | hold:${MAX_HOLD_TIME/60000}min | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
   console.log(`👛 Copy wallets: ${COPY_WALLETS.length}`)
   console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
 
