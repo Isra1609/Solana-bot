@@ -268,12 +268,12 @@ async function checkToken(tokenMint) {
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
     if (BLACKLIST.has(tokenMint))                        { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 5000)                                { console.log("❌ Liq too low"); return null }
+    if (liquidity < 3000)                                { console.log("❌ Liq too low"); return null }
     if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
     if (ageMin > 60)                                     { console.log("❌ Too old"); return null }
     if (ageMin < 3)                                      { console.log("❌ Too new"); return null }
-    if (volume5m < 2000)                                 { console.log("❌ Low vol"); return null }
+    if (volume5m < 1500)                                 { console.log("❌ Low vol"); return null }
     if (txns5m < 20)                                     { console.log("❌ Low txns"); return null }
     if (priceChange5m < 5)                               { console.log("❌ Not pumping"); return null }
     if (buyRatio < 0.62)                                 { console.log("❌ Too many sells"); return null }
