@@ -93,7 +93,7 @@ const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
 const MAX_POSITIONS        = 2
-const MIN_SCORE            = 10     // lowered from 12 to catch more opportunities
+const MIN_SCORE            = 10
 
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
@@ -116,9 +116,6 @@ async function checkCircuitBreaker(wallet) {
 }
 
 // ─── Copy wallets ─────────────────────────────────────────────────────────────
-// Wallet 1: +41.62% / +$58.8K 7D PnL (gmgn.ai verified)
-// Wallet 2: Alan Sousa — +52.04% / +$16.3K 7D PnL, 32% WR (high variance)
-// Wallet 3: FxwArENk... (user added)
 const COPY_WALLETS = [
   "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
@@ -272,11 +269,23 @@ async function checkToken(tokenMint) {
 
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
-    // FIX 1: Hard-reject zero/missing liquidity before anything else
-    if (BLACKLIST.has(tokenMint))        { console.log("❌ Blacklisted"); return null }
-    if (liquidity === 0)                 { console.log("❌ Zero liquidity — drained or unindexed"); return null }
-    if (liquidity < 1500)                { console.log("❌ Liq absolute floor"); return null }
-    if (liquidity < 3000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
+    if (BLACKLIST.has(tokenMint)) { console.log("❌ Blacklisted"); return null }
+
+    // ── FIXED LIQUIDITY CHECK ─────────────────────────────────────────────────
+    // DexScreener sometimes reports $0 liq for new/active tokens (data lag).
+    // If volume5m > 3000 and txns5m > 20, the token is clearly trading —
+    // treat liq as unindexed and allow it through. Otherwise apply hard floor.
+    const hasStrongActivity = volume5m > 3000 && txns5m > 20
+    if (liquidity === 0 && !hasStrongActivity) {
+      console.log("❌ Zero liquidity — no activity to confirm"); return null
+    }
+    if (liquidity > 0 && liquidity < 1500) {
+      console.log("❌ Liq absolute floor"); return null
+    }
+    if (liquidity > 0 && liquidity < 3000 && ageMin > 30) {
+      console.log("❌ Liq too low for age"); return null
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
@@ -510,7 +519,6 @@ async function scanPumpFun(wallet) {
     for (const coin of coins) {
       if (!coin.mint || coin.complete) continue
       const mcap = coin.usd_market_cap || 0
-      // FIX 2: Widened graduation window 55K–69K → 50K–75K
       if (mcap < 50000 || mcap > 75000) continue
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
@@ -538,7 +546,6 @@ async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
 
-    // FIX 3: Scan both latest profiles AND top boosted tokens in parallel
     const [newRes, boostRes] = await Promise.all([
       fetch("https://api.dexscreener.com/token-profiles/latest/v1"),
       fetch("https://api.dexscreener.com/token-boosts/top/v1")
