@@ -86,14 +86,14 @@ const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
 const TAKE_PROFIT          = 1.40   // +40%
-const INITIAL_STOP         = 0.93   // -7% hard stop (tighter)
+const INITIAL_STOP         = 0.93   // -7% hard stop
 const TRAIL_STOP_PCT       = 0.06   // 6% trail
-const MAX_HOLD_TIME        = 90000  // 90s — get out faster
+const MAX_HOLD_TIME        = 90000  // 90s
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
-const MAX_POSITIONS        = 2      // focus on fewer, better trades
-const MIN_SCORE            = 12     // balanced — still blocks weak setups
+const MAX_POSITIONS        = 2
+const MIN_SCORE            = 12
 
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
@@ -115,9 +115,14 @@ async function checkCircuitBreaker(wallet) {
   return false
 }
 
-// ─── Verified copy wallet — +41.62% / +$58.8K 7D PnL on gmgn.ai ─────────────
+// ─── Copy wallets ─────────────────────────────────────────────────────────────
+// Wallet 1: +41.62% / +$58.8K 7D PnL (gmgn.ai verified)
+// Wallet 2: Alan Sousa — +52.04% / +$16.3K 7D PnL, 32% WR (high variance)
+// Wallet 3: FxwArENk... (user added)
 const COPY_WALLETS = [
   "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
+  "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
+  "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
 ]
 
 const BLACKLIST = new Set([
@@ -131,7 +136,6 @@ const BLACKLIST = new Set([
   "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk",
   "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
   "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
-  // rugged today — never touch again
   "8immgrdVcwzXvSjeQBu363D6QyyLiT1pjEVYw6bonk",
   "AJwfjnjw964Z5SZPsvshJwF41EaQo2xNkKuEtHCepump",
   "6hgiPE2pVm58CA94aQsycBoL1wzXiExCzvHx2A4spump",
@@ -268,12 +272,11 @@ async function checkToken(tokenMint) {
 
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
-    // ── FIX 1: Hard-reject zero/missing liquidity before anything else ─────────
+    // FIX 1: Hard-reject zero/missing liquidity before anything else
     if (BLACKLIST.has(tokenMint))        { console.log("❌ Blacklisted"); return null }
     if (liquidity === 0)                 { console.log("❌ Zero liquidity — drained or unindexed"); return null }
     if (liquidity < 1500)                { console.log("❌ Liq absolute floor"); return null }
     if (liquidity < 3000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
-    // ──────────────────────────────────────────────────────────────────────────
 
     if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
@@ -507,7 +510,7 @@ async function scanPumpFun(wallet) {
     for (const coin of coins) {
       if (!coin.mint || coin.complete) continue
       const mcap = coin.usd_market_cap || 0
-      // FIX 2: Widened graduation window 55K–69K → 50K–75K to catch fast-spiking grads
+      // FIX 2: Widened graduation window 55K–69K → 50K–75K
       if (mcap < 50000 || mcap > 75000) continue
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
