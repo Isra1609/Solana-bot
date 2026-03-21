@@ -93,7 +93,7 @@ const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
 const MAX_POSITIONS        = 2      // focus on fewer, better trades
-const MIN_SCORE            = 14     // only the best setups
+const MIN_SCORE            = 12     // balanced — still blocks weak setups
 
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
@@ -273,10 +273,10 @@ async function checkToken(tokenMint) {
     if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
     if (ageMin > 60)                                     { console.log("❌ Too old"); return null }
     if (ageMin < 3)                                      { console.log("❌ Too new"); return null }
-    if (volume5m < 1500)                                 { console.log("❌ Low vol"); return null }
-    if (txns5m < 20)                                     { console.log("❌ Low txns"); return null }
-    if (priceChange5m < 5)                               { console.log("❌ Not pumping"); return null }
-    if (buyRatio < 0.62)                                 { console.log("❌ Too many sells"); return null }
+    if (volume5m < 1000)                                 { console.log("❌ Low vol"); return null }
+    if (txns5m < 15)                                     { console.log("❌ Low txns"); return null }
+    if (priceChange5m < 3)                               { console.log("❌ Not pumping"); return null }
+    if (buyRatio < 0.60)                                 { console.log("❌ Too many sells"); return null }
     if (ageMin > 30 && priceChange1h < -10)              { console.log("❌ Down 1h"); return null }
     if (ageMin > 45 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
 
