@@ -38,19 +38,19 @@ const CFG = {
   MAX_POSITIONS:         parseInt(  process.env.MAX_POS      || "1"),     // 1 open position at a time
 
   // Safety filters
-  MIN_LIQUIDITY_USD:     parseFloat(process.env.MIN_LIQ      || "25000"),
-  MAX_LIQUIDITY_USD:     parseFloat(process.env.MAX_LIQ      || "250000"),
-  MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "50000"),
-  MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "5000000"),
-  MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "8"),
+  MIN_LIQUIDITY_USD:     parseFloat(process.env.MIN_LIQ      || "5000"),
+  MAX_LIQUIDITY_USD:     parseFloat(process.env.MAX_LIQ      || "500000"),
+  MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "10000"),
+  MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "10000000"),
+  MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "5"),
   MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "120"),
-  MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "5000"),
-  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "20"),
-  MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.60"),
-  MIN_PRICE_CHANGE_5M:   parseFloat(process.env.MIN_PC5M     || "3"),
-  MAX_1H_NEGATIVE:       parseFloat(process.env.MAX_1H_NEG   || "-20"),
-  MIN_LIQ_MCAP_RATIO:    parseFloat(process.env.MIN_LM_RATIO || "0.05"),
-  MIN_SCORE:             parseInt(  process.env.MIN_SCORE    || "75"),    // out of 100
+  MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "1000"),
+  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "10"),
+  MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.55"),
+  MIN_PRICE_CHANGE_5M:   parseFloat(process.env.MIN_PC5M     || "2"),
+  MAX_1H_NEGATIVE:       parseFloat(process.env.MAX_1H_NEG   || "-30"),
+  MIN_LIQ_MCAP_RATIO:    parseFloat(process.env.MIN_LM_RATIO || "0.02"),
+  MIN_SCORE:             parseInt(  process.env.MIN_SCORE    || "45"),    // out of 100
 
   // Exit thresholds
   INITIAL_STOP_PCT:      parseFloat(process.env.STOP_PCT     || "0.12"),  // -12%
@@ -570,26 +570,29 @@ function scoreToken(pair) {
   const breakdown = {}
   let score = 0
 
-  // Liquidity quality (max 15)
+  // Liquidity quality (max 15) — calibrated for real Solana market ($5K–$50K typical)
   const liqScore = liquidity >= 50000  ? 15 :
-                   liquidity >= 30000  ? 12 :
-                   liquidity >= 25000  ? 9  : 0
+                   liquidity >= 25000  ? 12 :
+                   liquidity >= 15000  ? 10 :
+                   liquidity >= 10000  ? 8  :
+                   liquidity >= 5000   ? 5  : 0
   breakdown.liquidity = liqScore
   score += liqScore
 
-  // 5m volume (max 20)
-  const volScore = volume5m >= 50000 ? 20 :
-                   volume5m >= 20000 ? 16 :
-                   volume5m >= 10000 ? 12 :
-                   volume5m >= 5000  ? 8  : 0
+  // 5m volume (max 20) — $1K–$10K is typical for fresh tokens
+  const volScore = volume5m >= 30000 ? 20 :
+                   volume5m >= 10000 ? 16 :
+                   volume5m >= 5000  ? 12 :
+                   volume5m >= 2000  ? 8  :
+                   volume5m >= 1000  ? 5  : 0
   breakdown.volume5m = volScore
   score += volScore
 
-  // Txn count (max 10)
+  // Txn count (max 10) — 10–30 txns in 5m is real activity for a new token
   const txnScore = txns5m >= 100 ? 10 :
-                   txns5m >= 60  ? 8  :
-                   txns5m >= 30  ? 5  :
-                   txns5m >= 20  ? 3  : 0
+                   txns5m >= 50  ? 8  :
+                   txns5m >= 25  ? 6  :
+                   txns5m >= 10  ? 4  : 0
   breakdown.txns = txnScore
   score += txnScore
 
@@ -597,7 +600,7 @@ function scoreToken(pair) {
   const brScore = buyRatio >= 0.80 ? 15 :
                   buyRatio >= 0.70 ? 12 :
                   buyRatio >= 0.65 ? 9  :
-                  buyRatio >= 0.60 ? 6  : 0
+                  buyRatio >= 0.55 ? 6  : 0
   breakdown.buyRatio = brScore
   score += brScore
 
@@ -605,7 +608,7 @@ function scoreToken(pair) {
   const m5Score = priceChg5m >= 20 ? 15 :
                   priceChg5m >= 10 ? 12 :
                   priceChg5m >= 5  ? 9  :
-                  priceChg5m >= 3  ? 6  : 0
+                  priceChg5m >= 2  ? 5  : 0
   breakdown.momentum5m = m5Score
   score += m5Score
 
@@ -617,17 +620,17 @@ function scoreToken(pair) {
   breakdown.momentum1h = m1hScore
   score += m1hScore
 
-  // Age sweet spot (max 10)
-  const ageScore = ageMin >= 10 && ageMin <= 40 ? 10 :
-                   ageMin >= 8  && ageMin <= 60  ? 7  :
-                   ageMin <= 90  ? 3  : 0
+  // Age sweet spot (max 10) — new tokens (5–30min) score best
+  const ageScore = ageMin >= 5  && ageMin <= 30  ? 10 :
+                   ageMin >= 5  && ageMin <= 60   ? 7  :
+                   ageMin <= 120 ? 3 : 0
   breakdown.ageSweetSpot = ageScore
   score += ageScore
 
-  // Liq/MC ratio (max 10)
-  const lmScore = liqMcRatio >= 0.15 ? 10 :
-                  liqMcRatio >= 0.10 ? 7  :
-                  liqMcRatio >= 0.05 ? 4  : 0
+  // Liq/MC ratio (max 10) — lower floor to match thin markets
+  const lmScore = liqMcRatio >= 0.10 ? 10 :
+                  liqMcRatio >= 0.05 ? 7  :
+                  liqMcRatio >= 0.02 ? 4  : 0
   breakdown.liqMcRatio = lmScore
   score += lmScore
 
