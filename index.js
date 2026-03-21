@@ -115,10 +115,10 @@ async function checkCircuitBreaker(wallet) {
   return false
 }
 
-// ─── COPY WALLETS DISABLED — previous wallets were rugging you ───────────────
-// To re-enable: go to gmgn.ai → Smart Money → find wallets with
-// >60% win rate, >30 trades in last 7 days → paste addresses here
-const COPY_WALLETS = []
+// ─── Verified copy wallet — +41.62% / +$58.8K 7D PnL on gmgn.ai ─────────────
+const COPY_WALLETS = [
+  "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
+]
 
 const BLACKLIST = new Set([
   "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
