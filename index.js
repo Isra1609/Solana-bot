@@ -67,7 +67,6 @@ function printStats() {
   console.log(`═════════════════════════════════════════════\n`)
 }
 
-// ─── FIX 1: 8% position size, 0.35 SOL hard cap (was 25% — way too risky) ────
 async function getTradeAmount(wallet) {
   try {
     const balance = await connection.getBalance(wallet.publicKey)
@@ -86,18 +85,16 @@ async function getTradeAmount(wallet) {
 const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-// ─── FIX 2: Realistic exits (3x TP was fantasy, trail stop too wide) ──────────
-const TAKE_PROFIT          = 1.40   // +40% — actually hits on 100s holds
-const INITIAL_STOP         = 0.88   // -12% hard stop (was -25%)
-const TRAIL_STOP_PCT       = 0.07   // 7% trail (was 12%)
+const TAKE_PROFIT          = 1.40   // +40%
+const INITIAL_STOP         = 0.92   // -8% hard stop (tightened from -12%)
+const TRAIL_STOP_PCT       = 0.07   // 7% trail
 const MAX_HOLD_TIME        = 100000 // 100s
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
-const MAX_POSITIONS        = 3      // bumped since each position is now smaller
-const MIN_SCORE            = 11     // raised from 7 — cuts out weak signals
+const MAX_POSITIONS        = 3
+const MIN_SCORE            = 13     // raised from 11 — quality over quantity
 
-// ─── FIX 3: Daily circuit breaker — halts buys if down 20% on the day ─────────
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
 let circuitBroken          = false
@@ -118,13 +115,10 @@ async function checkCircuitBreaker(wallet) {
   return false
 }
 
-// ─── TODO: Replace with verified wallets from gmgn.ai or birdeye.so/leaderboard
-// Look for: >60% win rate, >50 trades, active in last 7 days ──────────────────
-const COPY_WALLETS = [
-  "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
-  "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
-  "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
-]
+// ─── COPY WALLETS DISABLED — previous wallets were rugging you ───────────────
+// To re-enable: go to gmgn.ai → Smart Money → find wallets with
+// >60% win rate, >30 trades in last 7 days → paste addresses here
+const COPY_WALLETS = []
 
 const BLACKLIST = new Set([
   "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
@@ -137,16 +131,19 @@ const BLACKLIST = new Set([
   "WENWENvqqNya429ubCdR81ZmD69brwQaaBYY6p3LCpk",
   "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
   "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
+  // tokens that rugged you today
+  "8immgrdVcwzXvSjeQBu363D6QyyLiT1pjEVYw6bonk",
+  "AJwfjnjw964Z5SZPsvshJwF41EaQo2xNkKuEtHCepump",
 ])
 
-const positions   = new Map()
-const triedTokens = new Map()   // FIX 4: Map with TTL (was permanent Set — missed re-entries)
+const positions     = new Map()
+const triedTokens   = new Map()
 const walletLastSig = new Map()
 let totalTrades = 0
 let winTrades   = 0
 let totalPnl    = 0
 
-const TRIED_TTL_MS = 12 * 60 * 1000  // re-evaluate same token after 12 min
+const TRIED_TTL_MS = 12 * 60 * 1000
 
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
@@ -185,7 +182,6 @@ async function getPrice(tokenMint) {
   } catch { return null }
 }
 
-// ─── FIX 5: Correct DexScreener price fallback (original was broken) ──────────
 async function getDexPrice(tokenMint) {
   try {
     const res = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${tokenMint}`)
@@ -197,7 +193,6 @@ async function getDexPrice(tokenMint) {
   } catch { return null }
 }
 
-// ─── FIX 6: Rug/honeypot check via rugcheck.xyz — was completely missing ───────
 async function isRug(tokenMint) {
   try {
     const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`)
@@ -232,7 +227,6 @@ async function isRug(tokenMint) {
   }
 }
 
-// ─── FIX 7: Re-fetch real on-chain balance before sells (fixes amount drift) ───
 async function getTokenBalance(walletPubkey, tokenMint) {
   try {
     const accounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
@@ -257,7 +251,7 @@ async function checkToken(tokenMint) {
 
     const liquidity     = pair?.liquidity?.usd || 0
     const volume5m      = pair?.volume?.m5 || 0
-    const volume1m      = pair?.volume?.m1 || 0  // FIX 8: for spike detection
+    const volume1m      = pair?.volume?.m1 || 0
     const priceChange5m = pair?.priceChange?.m5 || 0
     const priceChange1h = pair?.priceChange?.h1 || 0
     const priceChange6h = pair?.priceChange?.h6 || 0
@@ -298,7 +292,6 @@ async function checkToken(tokenMint) {
     else if (volume5m > 3000)    score += 2
     else                         score += 1
 
-    // FIX 8: Volume spike bonus — 35%+ of 5m vol in last 1m = strong momentum
     if (volume5m > 0 && volume1m / volume5m > 0.35) score += 2
 
     if (buyRatio > 0.78)         score += 3
@@ -328,7 +321,6 @@ async function buyToken(wallet, tokenMint, source) {
   if (!tokenMint || positions.has(tokenMint)) return
   if (positions.size >= MAX_POSITIONS) return
 
-  // FIX 4: TTL dedup — tokens re-evaluated after 12 min instead of never
   const lastTried = triedTokens.get(tokenMint)
   if (lastTried && Date.now() - lastTried < TRIED_TTL_MS) return
   triedTokens.set(tokenMint, Date.now())
@@ -340,7 +332,6 @@ async function buyToken(wallet, tokenMint, source) {
   const check = await checkToken(tokenMint)
   if (!check) return
 
-  // FIX 6: Rug check — runs after quality filter to not waste API calls
   console.log(`🔍 Running rugcheck...`)
   const rug = await isRug(tokenMint)
   if (rug) return
@@ -379,7 +370,6 @@ async function buyToken(wallet, tokenMint, source) {
 async function monitorPositions(wallet) {
   for (const [tokenMint, pos] of positions.entries()) {
     try {
-      // FIX 5: Use corrected getDexPrice instead of broken inline fallback
       const currentPrice = (await getPrice(tokenMint)) || (await getDexPrice(tokenMint))
       if (!currentPrice || currentPrice <= 0) continue
 
@@ -394,7 +384,6 @@ async function monitorPositions(wallet) {
       }
 
       const hitTP    = ratio >= TAKE_PROFIT
-      // FIX: Don't trail-stop before you're in profit — trail only kicks in above +5%
       const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.05
       const hitStop  = currentPrice <= pos.buyPrice * INITIAL_STOP
       const hitTime  = elapsed >= MAX_HOLD_TIME
@@ -405,7 +394,6 @@ async function monitorPositions(wallet) {
                        hitTrail ? "📉 TRAIL STOP"  : "⏰ TIME LIMIT"
         console.log(`${reason} | ${pct}% | peak:${peakPct}% | ${tokenMint}`)
         try {
-          // FIX 7: Use real on-chain balance for sell to prevent failed txns
           const liveAmount = await getTokenBalance(wallet.publicKey, tokenMint)
           const sellAmount = liveAmount || pos.rawAmount
           if (!sellAmount || sellAmount === "0") {
@@ -453,6 +441,7 @@ async function monitorPositions(wallet) {
 }
 
 async function scanCopyWallets(wallet) {
+  if (COPY_WALLETS.length === 0) return
   for (const copyWallet of COPY_WALLETS) {
     try {
       await sleep(2500)
@@ -463,9 +452,6 @@ async function scanCopyWallets(wallet) {
       if (sigs.length === 0) continue
 
       const lastSig = walletLastSig.get(copyWallet)
-
-      // FIX 9: On first run only process 1 sig to prevent burst buys
-      // On subsequent runs, process new sigs since last seen (max 2)
       const newSigs = lastSig
         ? sigs.filter(s => s.signature !== lastSig).slice(0, 2)
         : sigs.slice(0, 1)
@@ -538,7 +524,6 @@ async function scanPumpFun(wallet) {
   }
 }
 
-// FIX 10: Removed BOOST entirely — paid promotions have no edge
 async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
@@ -562,8 +547,8 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  size:8% | tp:+40% | stop:-12% | trail:7% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
-  console.log(`👛 Tracking ${COPY_WALLETS.length} copy wallets`)
+  console.log(`⚙️  size:8% | tp:+40% | stop:-8% | trail:7% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
+  console.log(`👛 Copy wallets: ${COPY_WALLETS.length} (disabled — add verified wallets from gmgn.ai)`)
   console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
 
   try {
