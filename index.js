@@ -216,7 +216,7 @@ async function isRug(tokenMint) {
     const hasDanger = dangerFlags.some(f => hardReject.some(h => f.includes(h)))
 
     if (hasDanger) { console.log(`🚨 Rug danger: ${dangerFlags.join(", ")}`); return true }
-    if (score < 400) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
+    if (score < 300) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
     if (warnFlags.length >= 3) { console.log(`⚠️  Too many warn flags (${warnFlags.length})`); return true }
 
     console.log(`✅ Rugcheck OK | Score:${score} | Warns:${warnFlags.length}`)
