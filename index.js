@@ -141,7 +141,7 @@ async function checkToken(tokenMint) {
     if (txns5m < 10)                                     { console.log("❌ Low txns"); return null }
     if (priceChange5m < 3)                               { console.log("❌ Not pumping"); return null }
     if (buyRatio < 0.55)                                 { console.log("❌ Too many sells"); return null }
-    if (ageMin > 30 && priceChange1h < 0)                { console.log("❌ Down 1h"); return null }
+    if (ageMin > 45 && priceChange1h < -10)              { console.log("❌ Down 1h"); return null }
     if (ageMin > 60 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
 
     let score = 0
