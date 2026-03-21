@@ -23,7 +23,6 @@ function sleep(ms) {
   return new Promise(res => setTimeout(res, ms))
 }
 
-// ── TRADE LOGGER ──────────────────────────────────────────────────────────────
 function logTrade(trade) {
   const logFile = "/tmp/trades.csv"
   const header = "timestamp,token,source,score,buyPrice,sellPrice,pct,result,ageMin,liquidity,marketCap,buyRatio,volume5m,holdSeconds\n"
@@ -87,17 +86,16 @@ async function getTradeAmount(wallet) {
 const SOL = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT        = 3.0
-const INITIAL_STOP       = 0.75
-const TRAIL_STOP_PCT     = 0.12
-const MAX_HOLD_TIME      = 120000
-const DEX_SCAN_INTERVAL  = 10000
-const PUMP_SCAN_INTERVAL = 8000
-const WALLET_SCAN_INTERVAL = 15000
-const MAX_POSITIONS      = 2
-const MIN_SCORE          = 7
+const TAKE_PROFIT          = 3.0
+const INITIAL_STOP         = 0.75
+const TRAIL_STOP_PCT       = 0.12
+const MAX_HOLD_TIME        = 120000
+const DEX_SCAN_INTERVAL    = 15000   // slowed from 10s to 15s
+const PUMP_SCAN_INTERVAL   = 15000   // slowed from 8s to 15s
+const WALLET_SCAN_INTERVAL = 30000   // slowed from 15s to 30s
+const MAX_POSITIONS        = 2
+const MIN_SCORE            = 7
 
-// ── YOUR COPY WALLETS ─────────────────────────────────────────────────────────
 const COPY_WALLETS = [
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
   "BtMBMPkoNbnLF9Xn552guQq528KKXcsNBNNBre3oaQtr",
@@ -348,6 +346,7 @@ async function monitorPositions(wallet) {
 async function scanCopyWallets(wallet) {
   for (const copyWallet of COPY_WALLETS) {
     try {
+      await sleep(2000) // delay between each wallet to avoid rate limits
       const sigs = await connection.getSignaturesForAddress(
         new PublicKey(copyWallet),
         { limit: 3 }
@@ -362,6 +361,7 @@ async function scanCopyWallets(wallet) {
 
       for (const sigInfo of newSigs) {
         try {
+          await sleep(1000) // delay between tx lookups
           const tx = await connection.getParsedTransaction(sigInfo.signature, {
             maxSupportedTransactionVersion: 0
           })
@@ -405,7 +405,7 @@ async function scanPumpFun(wallet) {
       if (mcap < 50000 || mcap > 69000) continue
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
-      await sleep(200)
+      await sleep(500)
     }
 
     const gradRes = await fetch("https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
@@ -418,7 +418,7 @@ async function scanPumpFun(wallet) {
       if (ageMin > 30) continue
       console.log(`🆕 Graduated: ${coin.symbol} age:${ageMin.toFixed(0)}m ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_NEW")
-      await sleep(200)
+      await sleep(500)
     }
   } catch (e) {
     console.log(`❌ Pump.fun error: ${e.message}`)
@@ -439,7 +439,7 @@ async function scanDexScreener(wallet) {
       for (const t of top) {
         if (t.tokenAddress) {
           await buyToken(wallet, t.tokenAddress, "BOOST")
-          await sleep(200)
+          await sleep(500)
         }
       }
     }
@@ -453,7 +453,7 @@ async function scanDexScreener(wallet) {
       for (const t of newSolana) {
         if (t.tokenAddress) {
           await buyToken(wallet, t.tokenAddress, "NEW")
-          await sleep(200)
+          await sleep(500)
         }
       }
     }
