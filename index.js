@@ -86,14 +86,14 @@ const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
 const TAKE_PROFIT          = 1.40   // +40%
-const INITIAL_STOP         = 0.92   // -8% hard stop (tightened from -12%)
-const TRAIL_STOP_PCT       = 0.07   // 7% trail
-const MAX_HOLD_TIME        = 100000 // 100s
+const INITIAL_STOP         = 0.93   // -7% hard stop (tighter)
+const TRAIL_STOP_PCT       = 0.06   // 6% trail
+const MAX_HOLD_TIME        = 90000  // 90s — get out faster
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
-const MAX_POSITIONS        = 3
-const MIN_SCORE            = 13     // raised from 11 — quality over quantity
+const MAX_POSITIONS        = 2      // focus on fewer, better trades
+const MIN_SCORE            = 14     // only the best setups
 
 const DAILY_LOSS_LIMIT_PCT = 0.20
 let dayStartBalance        = null
@@ -268,17 +268,17 @@ async function checkToken(tokenMint) {
     console.log(`🔎 Liq:$${Math.round(liquidity)} MC:$${Math.round(marketCap)} Age:${ageMin.toFixed(0)}m 5m:${priceChange5m}% Vol5m:$${Math.round(volume5m)} B:${buys5m} S:${sells5m} BR:${(buyRatio*100).toFixed(0)}%`)
 
     if (BLACKLIST.has(tokenMint))                        { console.log("❌ Blacklisted"); return null }
-    if (liquidity < 2000)                                { console.log("❌ Liq too low"); return null }
-    if (liquidity > 120000)                              { console.log("❌ Too big"); return null }
-    if (marketCap > 2500000)                             { console.log("❌ MC too high"); return null }
-    if (ageMin > 90)                                     { console.log("❌ Too old"); return null }
+    if (liquidity < 5000)                                { console.log("❌ Liq too low"); return null }
+    if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
+    if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
+    if (ageMin > 60)                                     { console.log("❌ Too old"); return null }
     if (ageMin < 3)                                      { console.log("❌ Too new"); return null }
-    if (volume5m < 800)                                  { console.log("❌ Low vol"); return null }
-    if (txns5m < 12)                                     { console.log("❌ Low txns"); return null }
-    if (priceChange5m < 4)                               { console.log("❌ Not pumping"); return null }
-    if (buyRatio < 0.58)                                 { console.log("❌ Too many sells"); return null }
-    if (ageMin > 45 && priceChange1h < -15)              { console.log("❌ Down 1h"); return null }
-    if (ageMin > 60 && priceChange6h < 8)                { console.log("❌ Weak 6h"); return null }
+    if (volume5m < 2000)                                 { console.log("❌ Low vol"); return null }
+    if (txns5m < 20)                                     { console.log("❌ Low txns"); return null }
+    if (priceChange5m < 5)                               { console.log("❌ Not pumping"); return null }
+    if (buyRatio < 0.62)                                 { console.log("❌ Too many sells"); return null }
+    if (ageMin > 30 && priceChange1h < -10)              { console.log("❌ Down 1h"); return null }
+    if (ageMin > 45 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
 
     let score = 0
 
