@@ -85,10 +85,10 @@ async function getTradeAmount(wallet) {
 const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-const TAKE_PROFIT          = 1.40
-const INITIAL_STOP         = 0.93
-const TRAIL_STOP_PCT       = 0.06
-const MAX_HOLD_TIME        = 90000
+const TAKE_PROFIT          = 1.40   // +40% TP unchanged
+const INITIAL_STOP         = 0.85   // -15% hard stop (was -7%, giving more room)
+const TRAIL_STOP_PCT       = 0.10   // 10% trail (was 6%, wider to ride pumps)
+const MAX_HOLD_TIME        = 180000 // 3 min (was 90s, doubled to let winners run)
 const DEX_SCAN_INTERVAL    = 20000
 const PUMP_SCAN_INTERVAL   = 18000
 const WALLET_SCAN_INTERVAL = 35000
@@ -116,11 +116,6 @@ async function checkCircuitBreaker(wallet) {
 }
 
 // ─── Copy wallets ─────────────────────────────────────────────────────────────
-// Wallet 1: GdRSPexh — original, +41.62% 7D
-// Wallet 2: 9Tee3dgA — Alan Sousa, +52.04% 7D, 50% WR
-// Wallet 3: FxwArENk — 95.8% WR, +$9,982 7D
-// Wallet 4: HiSo5kyk — 98.9% WR, +$9,585 7D (best WR on leaderboard)
-// Wallet 5: 4BdKaxN8 — new addition
 const COPY_WALLETS = [
   "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
@@ -421,7 +416,7 @@ async function monitorPositions(wallet) {
       }
 
       const hitTP    = ratio >= TAKE_PROFIT
-      const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.05
+      const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.10
       const hitStop  = currentPrice <= pos.buyPrice * INITIAL_STOP
       const hitTime  = elapsed >= MAX_HOLD_TIME
 
@@ -570,11 +565,7 @@ async function scanDexScreener(wallet) {
   try {
     console.log("🔍 Scanning DexScreener...")
 
-    const [newRes, boostRes] = await Promise.all([
-      fetch("https://api.dexscreener.com/token-profiles/latest/v1"),
-      fetch("https://api.dexscreener.com/token-boosts/top/v1")
-    ])
-
+    const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
     if (newRes.ok) {
       const tokens = await newRes.json()
       const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 12)
@@ -586,12 +577,24 @@ async function scanDexScreener(wallet) {
       }
     }
 
-    if (boostRes.ok) {
-      const boosted = await boostRes.json()
-      const boostedSolana = boosted.filter(t => t.chainId === "solana").slice(0, 8)
-      for (const t of boostedSolana) {
-        if (t.tokenAddress) {
-          await buyToken(wallet, t.tokenAddress, "BOOST")
+    // Trending fresh Solana pairs — under 60 min, pumping, high volume
+    const trendRes = await fetch("https://api.dexscreener.com/latest/dex/search?q=solana")
+    if (trendRes.ok) {
+      const trendData = await trendRes.json()
+      const trending = (trendData.pairs || [])
+        .filter(p =>
+          p.chainId === "solana" &&
+          p.volume?.m5 > 2000 &&
+          (p.priceChange?.m5 || 0) > 5 &&
+          p.pairCreatedAt &&
+          (Date.now() - p.pairCreatedAt) / 60000 < 60
+        )
+        .sort((a, b) => (b.volume?.m5 || 0) - (a.volume?.m5 || 0))
+        .slice(0, 10)
+
+      for (const p of trending) {
+        if (p.baseToken?.address) {
+          await buyToken(wallet, p.baseToken.address, "TREND")
           await sleep(600)
         }
       }
@@ -604,7 +607,7 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  size:8% | tp:+40% | stop:-7% | trail:6% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
+  console.log(`⚙️  size:8% | tp:+40% | stop:-15% | trail:10% | hold:${MAX_HOLD_TIME/1000}s | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
   console.log(`👛 Copy wallets: ${COPY_WALLETS.length}`)
   console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
 
