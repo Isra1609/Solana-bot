@@ -71,40 +71,38 @@ async function getTradeAmount(wallet) {
   try {
     const balance = await connection.getBalance(wallet.publicKey)
     const solBalance = balance / LAMPORTS_PER_SOL
-    const target = Math.min(solBalance * 0.08, 0.35)
-    const clamped = Math.max(0.01, target)
+    // 25% per trade — with 3 positions max that's 75% of balance deployed
+    const target = Math.min(solBalance * 0.25, 0.5)
+    const clamped = Math.max(0.02, target)
     const finalAmount = Math.floor(clamped * LAMPORTS_PER_SOL)
-    console.log(`💰 Balance: ${solBalance.toFixed(4)} SOL | Trade: ${clamped.toFixed(4)} SOL (8%)`)
+    console.log(`💰 Balance: ${solBalance.toFixed(4)} SOL | Trade: ${clamped.toFixed(4)} SOL (25%)`)
     return finalAmount
   } catch (e) {
     console.log(`❌ Balance check failed: ${e.message}`)
-    return Math.floor(0.02 * LAMPORTS_PER_SOL)
+    return Math.floor(0.05 * LAMPORTS_PER_SOL)
   }
 }
 
 const SOL  = "So11111111111111111111111111111111111111112"
 const BASE = "https://api.jup.ag"
 
-// ─── 3 Take Profit levels — sell 1/3 of position at each ─────────────────────
-// TP1: +20% → sell 33% (lock in quick profit)
-// TP2: +40% → sell 33% (solid gain)
-// TP3: +100% → sell remaining (moon bag)
-const TP1_RATIO   = 1.20
-const TP2_RATIO   = 1.40
-const TP3_RATIO   = 2.00
-const TP_FRACTION = 0.34  // ~1/3 each time (slight rounding buffer)
+// ─── 3 Take Profit levels ─────────────────────────────────────────────────────
+const TP1_RATIO   = 1.20  // +20% → sell 1/3
+const TP2_RATIO   = 1.40  // +40% → sell 1/3
+const TP3_RATIO   = 2.00  // +100% → sell rest
+const TP_FRACTION = 0.34
 
-const INITIAL_STOP   = 0.85   // -15% hard stop
-const TRAIL_STOP_PCT = 0.10   // 10% trail
+const INITIAL_STOP   = 0.82   // -18% hard stop (more room)
+const TRAIL_STOP_PCT = 0.12   // 12% trail
 const MAX_HOLD_TIME  = 900000 // 15 minutes
 
-const DEX_SCAN_INTERVAL    = 20000
-const PUMP_SCAN_INTERVAL   = 18000
-const WALLET_SCAN_INTERVAL = 35000
-const MAX_POSITIONS        = 2
-const MIN_SCORE            = 10
+const DEX_SCAN_INTERVAL    = 15000 // scan faster — every 15s instead of 20s
+const PUMP_SCAN_INTERVAL   = 15000
+const WALLET_SCAN_INTERVAL = 25000 // check copy wallets more often
+const MAX_POSITIONS        = 3     // up from 2 — more concurrent trades
+const MIN_SCORE            = 8     // down from 10 — more trades fire
 
-const DAILY_LOSS_LIMIT_PCT = 0.20
+const DAILY_LOSS_LIMIT_PCT = 0.25  // allow 25% drawdown before circuit break
 let dayStartBalance        = null
 let circuitBroken          = false
 
@@ -158,7 +156,7 @@ let totalTrades = 0
 let winTrades   = 0
 let totalPnl    = 0
 
-const TRIED_TTL_MS = 12 * 60 * 1000
+const TRIED_TTL_MS = 8 * 60 * 1000 // reduced from 12 to 8 min — retry sooner
 
 async function swap(wallet, inputMint, outputMint, amount) {
   const params = new URLSearchParams({
@@ -212,8 +210,8 @@ async function isRug(tokenMint) {
   try {
     const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report/summary`)
     if (!res.ok) {
-      console.log(`⚠️  Rugcheck unavailable — rejecting to be safe`)
-      return true
+      console.log(`⚠️  Rugcheck unavailable — skipping check`)
+      return false // Don't block if rugcheck is down — let volume/score filter
     }
     const data  = await res.json()
     const score = data?.score ?? 0
@@ -231,14 +229,14 @@ async function isRug(tokenMint) {
     const hasDanger = dangerFlags.some(f => hardReject.some(h => f.includes(h)))
 
     if (hasDanger) { console.log(`🚨 Rug danger: ${dangerFlags.join(", ")}`); return true }
-    if (score < 400) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true }
-    if (warnFlags.length >= 3) { console.log(`⚠️  Too many warn flags (${warnFlags.length})`); return true }
+    if (score < 300) { console.log(`🚨 Rugcheck score too low: ${score}/1000`); return true } // loosened from 400
+    if (warnFlags.length >= 4) { console.log(`⚠️  Too many warn flags (${warnFlags.length})`); return true } // loosened from 3
 
     console.log(`✅ Rugcheck OK | Score:${score} | Warns:${warnFlags.length}`)
     return false
   } catch (e) {
-    console.log(`❌ isRug error: ${e.message} — rejecting to be safe`)
-    return true
+    console.log(`❌ isRug error: ${e.message} — allowing through`)
+    return false // Don't block on errors
   }
 }
 
@@ -303,23 +301,24 @@ async function checkToken(tokenMint) {
 
     if (BLACKLIST.has(tokenMint)) { console.log("❌ Blacklisted"); return null }
 
-    const hasStrongActivity = volume5m > 3000 && txns5m > 20
+    // Smart liq check — allow zero liq if strong activity signals real trading
+    const hasStrongActivity = volume5m > 2000 && txns5m > 15
     if (liquidity === 0 && !hasStrongActivity) {
       console.log("❌ Zero liquidity — no activity to confirm"); return null
     }
-    if (liquidity > 0 && liquidity < 1500)                { console.log("❌ Liq absolute floor"); return null }
-    if (liquidity > 0 && liquidity < 3000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
+    if (liquidity > 0 && liquidity < 1000)                { console.log("❌ Liq too low"); return null }
+    if (liquidity > 0 && liquidity < 2000 && ageMin > 30) { console.log("❌ Liq too low for age"); return null }
 
-    if (liquidity > 100000)                              { console.log("❌ Too big"); return null }
-    if (marketCap > 2000000)                             { console.log("❌ MC too high"); return null }
-    if (ageMin > 60)                                     { console.log("❌ Too old"); return null }
-    if (ageMin < 3)                                      { console.log("❌ Too new"); return null }
-    if (volume5m < 1000)                                 { console.log("❌ Low vol"); return null }
-    if (txns5m < 15)                                     { console.log("❌ Low txns"); return null }
-    if (priceChange5m < 3)                               { console.log("❌ Not pumping"); return null }
-    if (buyRatio < 0.60)                                 { console.log("❌ Too many sells"); return null }
-    if (ageMin > 30 && priceChange1h < -10)              { console.log("❌ Down 1h"); return null }
-    if (ageMin > 45 && priceChange6h < 10)               { console.log("❌ Weak 6h"); return null }
+    if (liquidity > 150000)                              { console.log("❌ Too big"); return null }
+    if (marketCap > 3000000)                             { console.log("❌ MC too high"); return null }
+    if (ageMin > 90)                                     { console.log("❌ Too old"); return null } // loosened from 60
+    if (ageMin < 2)                                      { console.log("❌ Too new"); return null } // loosened from 3
+    if (volume5m < 500)                                  { console.log("❌ Low vol"); return null } // loosened from 1000
+    if (txns5m < 10)                                     { console.log("❌ Low txns"); return null } // loosened from 15
+    if (priceChange5m < 2)                               { console.log("❌ Not pumping"); return null } // loosened from 3
+    if (buyRatio < 0.55)                                 { console.log("❌ Too many sells"); return null } // loosened from 0.60
+    if (ageMin > 45 && priceChange1h < -15)              { console.log("❌ Down 1h"); return null }
+    if (ageMin > 60 && priceChange6h < 5)                { console.log("❌ Weak 6h"); return null }
 
     let score = 0
 
@@ -346,7 +345,7 @@ async function checkToken(tokenMint) {
     else if (ageMin < 30)        score += 2
     else if (ageMin < 60)        score += 1
 
-    if (liquidity > 8000 && liquidity < 80000) score += 1
+    if (liquidity > 5000 && liquidity < 100000) score += 1
 
     console.log(`⭐ Score: ${score}/20`)
     if (score < MIN_SCORE) { console.log("❌ Score too low"); return null }
@@ -395,7 +394,6 @@ async function buyToken(wallet, tokenMint, source) {
       score: check.score,
       peakPrice: buyPrice,
       stopPrice: buyPrice * INITIAL_STOP,
-      // Track which TPs have been hit
       tp1Hit: false,
       tp2Hit: false,
       meta: {
@@ -431,8 +429,7 @@ async function monitorPositions(wallet) {
       const hitTrail = currentPrice <= pos.stopPrice && ratio < 1.10
       const hitTime  = elapsed >= MAX_HOLD_TIME
 
-      // ── Partial TP sells ────────────────────────────────────────────────────
-      // TP1: hit +20% → sell 1/3
+      // TP1: +20% → sell 1/3
       if (!pos.tp1Hit && ratio >= TP1_RATIO) {
         pos.tp1Hit = true
         try {
@@ -448,7 +445,7 @@ async function monitorPositions(wallet) {
         } catch (e) { console.log(`❌ TP1 sell failed: ${e.message}`) }
       }
 
-      // TP2: hit +40% → sell another 1/3
+      // TP2: +40% → sell another 1/3
       if (pos.tp1Hit && !pos.tp2Hit && ratio >= TP2_RATIO) {
         pos.tp2Hit = true
         try {
@@ -463,9 +460,7 @@ async function monitorPositions(wallet) {
           }
         } catch (e) { console.log(`❌ TP2 sell failed: ${e.message}`) }
       }
-      // ───────────────────────────────────────────────────────────────────────
 
-      // Full exit conditions
       const hitTP3 = pos.tp2Hit && ratio >= TP3_RATIO
 
       if (hitTP3 || hitTrail || hitStop || hitTime) {
@@ -526,23 +521,23 @@ async function scanCopyWallets(wallet) {
   if (COPY_WALLETS.length === 0) return
   for (const copyWallet of COPY_WALLETS) {
     try {
-      await sleep(2500)
+      await sleep(2000)
       const sigs = await connection.getSignaturesForAddress(
         new PublicKey(copyWallet),
-        { limit: 3 }
+        { limit: 5 } // check more recent txs
       )
       if (sigs.length === 0) continue
 
       const lastSig = walletLastSig.get(copyWallet)
       const newSigs = lastSig
-        ? sigs.filter(s => s.signature !== lastSig).slice(0, 2)
-        : sigs.slice(0, 1)
+        ? sigs.filter(s => s.signature !== lastSig).slice(0, 3)
+        : sigs.slice(0, 2)
 
       walletLastSig.set(copyWallet, sigs[0].signature)
 
       for (const sigInfo of newSigs) {
         try {
-          await sleep(1200)
+          await sleep(1000)
           const tx = await connection.getParsedTransaction(sigInfo.signature, {
             maxSupportedTransactionVersion: 0
           })
@@ -588,10 +583,10 @@ async function scanPumpFun(wallet) {
     for (const coin of coins) {
       if (!coin.mint || coin.complete) continue
       const mcap = coin.usd_market_cap || 0
-      if (mcap < 50000 || mcap > 75000) continue
+      if (mcap < 45000 || mcap > 80000) continue // slightly wider window
       console.log(`🎓 Near grad: ${coin.symbol} MC:$${Math.round(mcap)} ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_GRAD")
-      await sleep(600)
+      await sleep(500)
     }
 
     const gradRes = await fetch("https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=last_trade_timestamp&order=DESC&includeNsfw=false")
@@ -601,10 +596,10 @@ async function scanPumpFun(wallet) {
     for (const coin of gradCoins) {
       if (!coin.mint || !coin.complete) continue
       const ageMin = (Date.now() - coin.created_timestamp) / 1000 / 60
-      if (ageMin > 25) continue
+      if (ageMin > 30) continue // extended from 25 to 30
       console.log(`🆕 Graduated: ${coin.symbol} age:${ageMin.toFixed(0)}m ${coin.mint}`)
       await buyToken(wallet, coin.mint, "PUMP_NEW")
-      await sleep(600)
+      await sleep(500)
     }
   } catch (e) {
     console.log(`❌ Pump.fun error: ${e.message}`)
@@ -618,11 +613,11 @@ async function scanDexScreener(wallet) {
     const newRes = await fetch("https://api.dexscreener.com/token-profiles/latest/v1")
     if (newRes.ok) {
       const tokens = await newRes.json()
-      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 12)
+      const newSolana = tokens.filter(t => t.chainId === "solana").slice(0, 15) // more tokens
       for (const t of newSolana) {
         if (t.tokenAddress) {
           await buyToken(wallet, t.tokenAddress, "NEW")
-          await sleep(600)
+          await sleep(400)
         }
       }
     }
@@ -633,18 +628,18 @@ async function scanDexScreener(wallet) {
       const trending = (trendData.pairs || [])
         .filter(p =>
           p.chainId === "solana" &&
-          p.volume?.m5 > 2000 &&
-          (p.priceChange?.m5 || 0) > 5 &&
+          p.volume?.m5 > 1000 &&
+          (p.priceChange?.m5 || 0) > 3 &&
           p.pairCreatedAt &&
-          (Date.now() - p.pairCreatedAt) / 60000 < 60
+          (Date.now() - p.pairCreatedAt) / 60000 < 90
         )
         .sort((a, b) => (b.volume?.m5 || 0) - (a.volume?.m5 || 0))
-        .slice(0, 10)
+        .slice(0, 12)
 
       for (const p of trending) {
         if (p.baseToken?.address) {
           await buyToken(wallet, p.baseToken.address, "TREND")
-          await sleep(600)
+          await sleep(400)
         }
       }
     }
@@ -656,7 +651,7 @@ async function scanDexScreener(wallet) {
 async function runBot() {
   const wallet = loadWallet()
   console.log("🚀 Bot running:", wallet.publicKey.toString())
-  console.log(`⚙️  size:8% | TP1:+20% TP2:+40% TP3:+100% | stop:-15% | trail:10% | hold:${MAX_HOLD_TIME/60000}min | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
+  console.log(`⚙️  size:25% | TP1:+20% TP2:+40% TP3:+100% | stop:-18% | trail:12% | hold:15min | maxPos:${MAX_POSITIONS} | minScore:${MIN_SCORE}/20`)
   console.log(`👛 Copy wallets: ${COPY_WALLETS.length}`)
   console.log(`🛡️  Rug check: ON | Circuit breaker: -${DAILY_LOSS_LIMIT_PCT*100}%/day`)
 
@@ -699,7 +694,7 @@ async function runBot() {
       lastStats = Date.now()
     }
 
-    await sleep(2000)
+    await sleep(1500) // tighter loop
   }
 }
 
