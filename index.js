@@ -73,6 +73,12 @@ const CFG = {
   // 2-pass entry delay
   CONFIRM_DELAY_MS:      parseInt(  process.env.CONFIRM_DELAY || "5000"),  // 5s — fast enough to confirm, slow enough to avoid fake candles
 
+  // PumpPortal — pump.fun bonding curve + PumpSwap trading
+  // No API key needed. 0.5% fee per trade. pool:"auto" handles pre/post graduation.
+  PUMPPORTAL_URL:        "https://pumpportal.fun/api/trade-local",
+  PUMP_SLIPPAGE:         parseInt(process.env.PUMP_SLIPPAGE  || "15"),   // 15% slippage for bonding curve
+  PUMP_PRIORITY_FEE:     parseFloat(process.env.PUMP_PRIORITY || "0.005"), // SOL priority fee
+
   // Scan intervals
   DEX_SCAN_INTERVAL_MS:    parseInt(process.env.DEX_INTERVAL    || "60000"), // secondary — slow scan
   PUMP_SCAN_INTERVAL_MS:   parseInt(process.env.PUMP_INTERVAL   || "30000"), // secondary
@@ -474,6 +480,76 @@ function recordLoss() {
 // ─────────────────────────────────────────────────────────────────────────────
 //  JUPITER SWAP EXECUTION
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  PUMPPORTAL SWAP  (pump.fun bonding curve + PumpSwap AMM)
+//  Used for: pre-graduation bonding curve tokens AND graduated PumpSwap tokens
+//  pool:"auto" detects which one and routes accordingly — no code change needed
+//  Docs: https://pumpportal.fun/local-trading-api/trading-api
+//  Fee: 0.5% per trade (charged by PumpPortal)
+// ─────────────────────────────────────────────────────────────────────────────
+async function pumpPortalSwap(wallet, tokenMint, action, amountSol, label = "") {
+  // action = "buy" | "sell"
+  // amountSol = SOL amount as number (e.g. 0.05)
+  // For sells we pass "100%" to sell entire balance
+
+  const isSell   = action === "sell"
+  const body     = {
+    publicKey:        wallet.publicKey.toString(),
+    action,
+    mint:             tokenMint,
+    amount:           isSell ? amountSol : Math.floor(amountSol * LAMPORTS_PER_SOL), // lamports for buy, "100%" or token amount for sell
+    denominatedInSol: isSell ? "false" : "true",
+    slippage:         CFG.PUMP_SLIPPAGE,
+    priorityFee:      CFG.PUMP_PRIORITY_FEE,
+    pool:             "auto",  // auto-detects bonding curve vs PumpSwap AMM
+  }
+
+  // For full sells, use percentage
+  if (isSell && typeof amountSol === "string" && amountSol.endsWith("%")) {
+    body.amount           = amountSol
+    body.denominatedInSol = "false"
+  }
+
+  log("INFO", `PumpPortal ${action} | ${tokenMint.slice(0,8)}... | ${isSell ? amountSol : amountSol.toFixed(4)+"SOL"} [${label}]`)
+
+  const res = await fetch(CFG.PUMPPORTAL_URL, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify(body),
+    signal:  AbortSignal.timeout(10000),
+  })
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText)
+    throw new Error(`PumpPortal ${action} HTTP ${res.status}: ${errText.slice(0, 200)}`)
+  }
+
+  // Response is raw bytes of serialized transaction
+  const txBytes = new Uint8Array(await res.arrayBuffer())
+  if (!txBytes || txBytes.length === 0) {
+    throw new Error(`PumpPortal returned empty transaction [${label}]`)
+  }
+
+  // Sign and send via our RPC
+  const tx = VersionedTransaction.deserialize(txBytes)
+  tx.sign([wallet])
+
+  const sig = await connection.sendTransaction(tx, {
+    skipPreflight:       false,
+    preflightCommitment: "confirmed",
+    maxRetries:          3,
+  })
+
+  // Wait for confirmation
+  const { value: status } = await connection.confirmTransaction(sig, "confirmed")
+  if (status?.err) {
+    throw new Error(`PumpPortal tx failed on-chain: ${JSON.stringify(status.err)} | sig:${sig}`)
+  }
+
+  log("CONFIRM", `PumpPortal ${action} confirmed | sig:${sig} [${label}]`)
+  return { signature: sig, status: "Success" }
+}
+
 async function swap(wallet, inputMint, outputMint, amount, label = "") {
   const params = new URLSearchParams({
     inputMint,
@@ -1188,26 +1264,53 @@ async function executeBuy(wallet, tokenMint, evalData) {
   }
   saveState()
 
-  log("BUY", `Submitting buy | ${tokenMint.slice(0,8)}... | ${(tradeAmount/LAMPORTS_PER_SOL).toFixed(4)}SOL | score:${evalData.score}`)
+  // Determine swap route:
+  // Pre-grad (bonding curve, $0 DEX liq) → PumpPortal (pool:auto handles it)
+  // Post-grad (real DEX liq)             → Jupiter first, PumpPortal fallback
+  const isPreGrad   = (evalData.liquidity || 0) < 100 || evalData.pair?._source === "pumpfun"
+  const tradeSolAmt = tradeAmount / LAMPORTS_PER_SOL
+  const routeLabel  = isPreGrad ? "PUMPPORTAL" : "JUPITER"
+
+  log("BUY", `Submitting buy via ${routeLabel} | ${tokenMint.slice(0,8)}... | ${tradeSolAmt.toFixed(4)}SOL | score:${evalData.score}`)
 
   try {
-    const result   = await swap(wallet, SOL_MINT, tokenMint, tradeAmount, "BUY")
-    const outAmount = (result.outputAmount || result.totalOutputAmount || "0").toString()
+    let result
+    if (isPreGrad) {
+      // Bonding curve token — use PumpPortal directly
+      result = await pumpPortalSwap(wallet, tokenMint, "buy", tradeSolAmt, "BUY")
+    } else {
+      // DEX token — try Jupiter first
+      try {
+        result = await swap(wallet, SOL_MINT, tokenMint, tradeAmount, "BUY_JUP")
+      } catch (jupErr) {
+        log("WARN", `Jupiter failed: ${jupErr.message} — falling back to PumpPortal`)
+        result = await pumpPortalSwap(wallet, tokenMint, "buy", tradeSolAmt, "BUY_PUMP_FALLBACK")
+      }
+    }
+
+    // PumpPortal doesn't return outputAmount — fetch token balance after buy
+    let outAmount = (result?.outputAmount || result?.totalOutputAmount || "0").toString()
+    if (outAmount === "0") {
+      await sleep(2000) // wait for chain to settle
+      const bal = await getTokenBalance(wallet.publicKey, tokenMint)
+      outAmount = bal || "0"
+    }
 
     state.positions[tokenMint].status    = "open"
     state.positions[tokenMint].buyPrice  = buyPrice
     state.positions[tokenMint].rawAmount = outAmount
     state.positions[tokenMint].peakPrice = buyPrice
     state.positions[tokenMint].stopPrice = buyPrice * (1 - CFG.INITIAL_STOP_PCT)
+    state.positions[tokenMint].route     = routeLabel
 
-    log("BUY", `✅ BOUGHT | ${tokenMint.slice(0,8)}... | price:${buyPrice} | tokens:${outAmount} | liq:$${Math.round(evalData.liquidity)} | mc:$${Math.round(evalData.marketCap)} | age:${evalData.ageMin.toFixed(1)}min`)
+    log("BUY", `✅ BOUGHT via ${routeLabel} | ${tokenMint.slice(0,8)}... | price:${buyPrice} | tokens:${outAmount} | liq:$${Math.round(evalData.liquidity)} | mc:$${Math.round(evalData.marketCap)} | age:${evalData.ageMin?.toFixed(1)}min`)
     state.tradesTaken++
     saveState()
   } catch (e) {
-    log("FAIL", `Buy failed for ${tokenMint.slice(0,8)}...: ${e.message}`)
+    log("FAIL", `Buy failed [${routeLabel}] for ${tokenMint.slice(0,8)}...: ${e.message}`)
     state.failedSwaps.push(Date.now())
     delete state.positions[tokenMint]
-    addCooldown(tokenMint, 1800000) // 30min after buy fail
+    addCooldown(tokenMint, 1800000)
     saveState()
   }
 }
@@ -1222,11 +1325,26 @@ async function executeSell(wallet, tokenMint, amount, reason, isPartial = false)
   const prevStatus = pos.status
   pos.status       = "pending_sell"
 
-  log("SELL", `Submitting sell | ${tokenMint.slice(0,8)}... | reason:${reason} | amount:${amount} | partial:${isPartial}`)
+  // Route sell same way we bought — check position route tag
+  const sellRoute = pos.route || "JUPITER"
+  const isPreGrad = sellRoute === "PUMPPORTAL" || (pos.meta?.liquidity || 0) < 100
+
+  log("SELL", `Submitting sell via ${sellRoute} | ${tokenMint.slice(0,8)}... | reason:${reason} | partial:${isPartial}`)
 
   try {
-    const result = await swap(wallet, tokenMint, SOL_MINT, amount, `SELL_${reason}`)
-    log("SELL", `✅ Sold | ${tokenMint.slice(0,8)}... | reason:${reason}`)
+    let result
+    if (isPreGrad) {
+      // Sell token amount directly via PumpPortal
+      result = await pumpPortalSwap(wallet, tokenMint, "sell", amount, `SELL_${reason}`)
+    } else {
+      try {
+        result = await swap(wallet, tokenMint, SOL_MINT, amount, `SELL_${reason}`)
+      } catch (jupErr) {
+        log("WARN", `Jupiter sell failed: ${jupErr.message} — falling back to PumpPortal`)
+        result = await pumpPortalSwap(wallet, tokenMint, "sell", amount, `SELL_${reason}_PUMP_FB`)
+      }
+    }
+    log("SELL", `✅ Sold via ${sellRoute} | ${tokenMint.slice(0,8)}... | reason:${reason}`)
 
     if (!isPartial) {
       // Full exit — close position
@@ -1673,19 +1791,38 @@ async function scanCopyWallets(wallet) {
 
           for (const b of bought) {
             if (STATIC_BLACKLIST.has(b.mint)) continue
-            // Skip known stablecoin mints and wrapped tokens
+
+            // ── Pre-flight checks before any RPC calls ──────────────────────
+            // Skip stablecoins — wallets often hold USDT/USDC and we misread as buys
             if (b.mint === "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB") continue // USDT
             if (b.mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") continue // USDC
-            if (b.mint === "USD1ttGY...".slice(0,4) && b.mint.startsWith("USD")) continue // any USD stablecoin
+            if (b.mint === "USD1ygnE8URFjQRouBKmhkBkEMxKFnHczvF6KCQHQ4Ud")  continue // USD1
+
+            // ── Quick viability check ────────────────────────────────────────
+            // We now support BOTH pre-grad bonding curve (PumpPortal) AND
+            // post-grad DEX tokens (Jupiter). Only skip truly dead tokens.
+            // Dead = no DexScreener data AND no pump.fun data (token doesn't exist)
+            try {
+              const quickDex = await getDexPairData(b.mint)
+              const quickLiq = quickDex?.liquidity?.usd || 0
+              if (quickLiq === 0) {
+                // No DEX liq — check if it's a live pump.fun bonding curve token
+                const quickPump = await getPumpFunData(b.mint)
+                if (!quickPump || (quickPump.marketCap || 0) < 1000) {
+                  log("SCAN", `Skip dead token (no DEX + no pump.fun): ${b.mint.slice(0,8)}...`)
+                  continue
+                }
+                log("SCAN", `Pre-grad bonding curve token MC:$${Math.round(quickPump.marketCap)} — will use PumpPortal`)
+              }
+            } catch { /* if check fails, proceed anyway */ }
+
             // Record this wallet as a buyer — enables smart wallet cluster detection
             recordSmartWalletBuy(b.mint, copyWallet)
             const clusterCount = getSmartWalletBuyCount(b.mint)
 
             // Cluster signal: 2+ wallets bought same token = bypass seenTokens
-            // This is the strongest signal we have — always re-evaluate
             if (clusterCount >= 2) {
               log("SCAN", `CLUSTER SIGNAL: ${clusterCount} tracked wallets bought ${b.mint.slice(0,8)}... — priority entry`)
-              // Remove from seenTokens so it gets a fresh evaluation
               seenTokens.delete(b.mint)
             }
 
