@@ -38,7 +38,7 @@ const CFG = {
   MAX_POSITIONS:         parseInt(  process.env.MAX_POS      || "1"),     // 1 open position at a time
 
   // Safety filters
-  MIN_LIQUIDITY_USD:     parseFloat(process.env.MIN_LIQ      || "5000"),
+  MIN_LIQUIDITY_USD:     parseFloat(process.env.MIN_LIQ      || "2000"),
   MAX_LIQUIDITY_USD:     parseFloat(process.env.MAX_LIQ      || "500000"),
   MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "10000"),
   MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "10000000"),
@@ -131,8 +131,16 @@ const COPY_WALLETS = (process.env.COPY_WALLETS || "")
   .map(w => w.trim())
   .filter(w => w.length > 30)
 
-// Fallback hardcoded list — override with COPY_WALLETS env var or clear this array
+// Seed wallets — known profitable traders from GMGN/Kolscan leaderboards
+// The bot will auto-expand this list by fetching fresh wallets from GMGN every hour
 const COPY_WALLETS_DEFAULT = [
+  // From GMGN smart money leaderboard (Jan 2026)
+  "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
+  // From Axiom leaderboard
+  "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
+  // From KolScan
+  "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm",
+  // Additional known active traders
   "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
   "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
   "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
@@ -140,8 +148,84 @@ const COPY_WALLETS_DEFAULT = [
   "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
 ]
 
-const ACTIVE_COPY_WALLETS = COPY_WALLETS.length > 0 ? COPY_WALLETS : COPY_WALLETS_DEFAULT
-const walletLastSig       = new Map() // copyWallet → last seen signature
+// Live wallet list — expands automatically as GMGN fetches fresh smart money
+const activeWalletSet = new Set(
+  COPY_WALLETS.length > 0 ? COPY_WALLETS : COPY_WALLETS_DEFAULT
+)
+const walletLastSig = new Map() // address → last seen signature
+
+// Returns the current live wallet list
+function getActiveWallets() { return [...activeWalletSet] }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GMGN SMART WALLET DISCOVERY
+//  Fetches the top profitable wallets from GMGN's leaderboard API every hour.
+//  This keeps the copy wallet list fresh without manual updates.
+//  Replicates: GMGN "Smart Money" tab + Cielo Finance wallet leaderboard
+// ─────────────────────────────────────────────────────────────────────────────
+async function refreshSmartWalletsFromGMGN() {
+  try {
+    // GMGN top traders endpoint — sorted by 7d PnL, Solana chain
+    const res = await fetch(
+      "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=pnl&direction=desc&limit=20&tag=smart_degen",
+      { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(8000) }
+    )
+    if (!res.ok) {
+      log("WARN", `GMGN wallet rank HTTP ${res.status} — keeping existing wallets`)
+      return
+    }
+    const json = await res.json()
+    const wallets = json?.data?.rank || json?.rank || []
+
+    if (!Array.isArray(wallets) || wallets.length === 0) {
+      // Try alternate endpoint shape
+      log("WARN", "GMGN rank: empty response — trying alternate endpoint")
+      await refreshSmartWalletsAlt()
+      return
+    }
+
+    let added = 0
+    for (const w of wallets) {
+      const addr   = w.wallet_address || w.address || w.wallet
+      const winRate = parseFloat(w.win_rate || w.winRate || 0)
+      const pnl     = parseFloat(w.pnl || w.realized_profit || 0)
+
+      if (!addr || addr.length < 32) continue
+      // Only add wallets with decent win rate and positive PnL
+      if (winRate < 0.55 || pnl < 0) continue
+      if (!activeWalletSet.has(addr)) {
+        activeWalletSet.add(addr)
+        added++
+        log("INFO", `GMGN added smart wallet: ${addr.slice(0,8)}... WR:${(winRate*100).toFixed(0)}% PnL:${pnl.toFixed(1)}SOL`)
+      }
+    }
+    log("INFO", `GMGN wallet refresh: ${added} new wallets added | total tracking: ${activeWalletSet.size}`)
+  } catch (e) {
+    log("WARN", `GMGN wallet refresh failed: ${e.message}`)
+  }
+}
+
+// Alternate GMGN endpoint — try trending traders if main rank fails
+async function refreshSmartWalletsAlt() {
+  try {
+    const res = await fetch(
+      "https://gmgn.ai/defi/quotation/v1/rank/sol/wallets/7d?orderby=winrate&direction=desc&limit=20",
+      { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(8000) }
+    )
+    if (!res.ok) return
+    const json    = await res.json()
+    const wallets = json?.data?.rank || json?.rank || []
+    let added = 0
+    for (const w of wallets) {
+      const addr = w.wallet_address || w.address || w.wallet
+      if (!addr || addr.length < 32) continue
+      if (!activeWalletSet.has(addr)) { activeWalletSet.add(addr); added++ }
+    }
+    if (added > 0) log("INFO", `GMGN alt refresh: +${added} wallets`)
+  } catch (e) {
+    log("WARN", `GMGN alt refresh: ${e.message}`)
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  STATE  (in-memory + persisted to disk)
@@ -1370,9 +1454,9 @@ async function scanPumpFun(wallet) {
 //  COPY WALLET SCANNER
 // ─────────────────────────────────────────────────────────────────────────────
 async function scanCopyWallets(wallet) {
-  if (ACTIVE_COPY_WALLETS.length === 0) return
-
-  for (const copyWallet of ACTIVE_COPY_WALLETS) {
+  const wallets = getActiveWallets()
+  if (wallets.length === 0) return
+  for (const copyWallet of wallets) {
     try {
       await sleep(1500)
       let sigs
@@ -1593,13 +1677,17 @@ async function runBot() {
     log("START", `Resuming ${reopen.length} open position(s) from disk`)
   }
 
-  let lastDexScan    = 0
-  let lastPumpScan   = 0
-  let lastWalletScan = 0
-  let lastSummary    = 0
+  // Immediately fetch fresh smart wallets from GMGN on startup
+  log("INFO", "Fetching fresh smart wallets from GMGN...")
+  await refreshSmartWalletsFromGMGN()
+  let lastWalletRefresh = Date.now()
+  let lastDexScan      = 0
+  let lastPumpScan     = 0
+  let lastWalletScan   = 0
+  let lastSummary      = 0
   let loopCount      = 0
 
-  log("START", `Copy wallets:  ${ACTIVE_COPY_WALLETS.length} | Pump.fun: ON | Rugcheck.xyz: ${CFG.RUGCHECK_ENABLED ? "ON" : "OFF"}`)
+  log("START", `Copy wallets:  ${getActiveWallets().length} | Pump.fun: ON | Rugcheck.xyz: ${CFG.RUGCHECK_ENABLED ? "ON" : "OFF"}`)
 
   // Main loop
   while (true) {
@@ -1617,6 +1705,14 @@ async function runBot() {
 
       // Circuit breaker updates
       await updateCircuitBreakers(wallet.publicKey)
+
+      // ── GMGN SMART WALLET REFRESH — every hour ──────────────────────────
+      if (Date.now() - lastWalletRefresh > 3600000) {
+        log("INFO", "Refreshing smart wallets from GMGN leaderboard...")
+        await refreshSmartWalletsFromGMGN()
+        lastWalletRefresh = Date.now()
+        log("INFO", `Now tracking ${getActiveWallets().length} wallets`)
+      }
 
       // ── SCANNING PRIORITY ORDER ──────────────────────────────────────────
       // 1. Copy wallets — PRIMARY signal, fastest poll (every 8s)
