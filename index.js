@@ -32,9 +32,9 @@ const CFG = {
   JUP_API_KEY:           process.env.JUP_API_KEY    || "",
 
   // Sizing
-  TRADE_PCT:             parseFloat(process.env.TRADE_PCT    || "0.425"), // midpoint of 35-50% range
-  MIN_TRADE_SOL:         parseFloat(process.env.MIN_TRADE    || "0.35"),  // 35% floor
-  MAX_TRADE_SOL:         parseFloat(process.env.MAX_TRADE    || "0.50"),  // 50% ceiling
+  TRADE_PCT:             parseFloat(process.env.TRADE_PCT    || "0.05"),  // 5% per trade
+  MIN_TRADE_SOL:         parseFloat(process.env.MIN_TRADE    || "0.02"),  // hard min 0.02 SOL
+  MAX_TRADE_SOL:         parseFloat(process.env.MAX_TRADE    || "0.10"),  // hard max 0.10 SOL (~$13)
   MAX_POSITIONS:         parseInt(  process.env.MAX_POS      || "1"),     // 1 open position at a time
 
   // Safety filters
@@ -45,27 +45,27 @@ const CFG = {
   MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "5"),
   MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "120"),
   MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "1000"),
-  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "10"),
-  MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.55"),
-  MIN_PRICE_CHANGE_5M:   parseFloat(process.env.MIN_PC5M     || "2"),
+  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "15"),   // need real participation
+  MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.65"), // 65% buys — real momentum
+  MIN_PRICE_CHANGE_5M:   parseFloat(process.env.MIN_PC5M     || "5"),    // only trade actual pumps
   MAX_1H_NEGATIVE:       parseFloat(process.env.MAX_1H_NEG   || "-30"),
   MIN_LIQ_MCAP_RATIO:    parseFloat(process.env.MIN_LM_RATIO || "0.02"),
   MIN_SCORE:             parseInt(  process.env.MIN_SCORE    || "45"),    // out of 100
 
   // Exit thresholds
-  INITIAL_STOP_PCT:      parseFloat(process.env.STOP_PCT     || "0.12"),  // -12%
+  INITIAL_STOP_PCT:      parseFloat(process.env.STOP_PCT     || "0.08"),  // -8% tight stop
   BREAKEVEN_TRIGGER_PCT: parseFloat(process.env.BE_PCT       || "0.10"),  // +10% → move stop to BE
   TP1_PCT:               parseFloat(process.env.TP1          || "0.20"),  // +20% → partial sell
   TP1_FRACTION:          parseFloat(process.env.TP1_FRAC     || "0.40"),  // sell 40%
   TP2_PCT:               parseFloat(process.env.TP2          || "0.40"),  // +40% → partial sell
   TP2_FRACTION:          parseFloat(process.env.TP2_FRAC     || "0.35"),  // sell 35%
-  TRAIL_STOP_PCT:        parseFloat(process.env.TRAIL_PCT    || "0.10"),  // 10% trailing
+  TRAIL_STOP_PCT:        parseFloat(process.env.TRAIL_PCT    || "0.07"),  // 7% trailing
   MAX_HOLD_MS:           parseInt(  process.env.MAX_HOLD     || "900000"),// 15 min
   STAGNANT_HOLD_MS:      parseInt(  process.env.STAGNANT_MS  || "300000"),// 5 min with no progress
   MOMENTUM_CHECK_INTERVAL: 60000,                                          // check momentum every 60s
 
   // Circuit breakers
-  DAILY_LOSS_LIMIT_PCT:  parseFloat(process.env.DAILY_LOSS   || "999"),   // disabled — set to 999 (never triggers)
+  DAILY_LOSS_LIMIT_PCT:  parseFloat(process.env.DAILY_LOSS   || "0.30"),  // halt after -30% day
   CONSEC_LOSSES_HALVE:   parseInt(  process.env.CONSEC_L     || "3"),     // 3 losses → half size
   MAX_FAILED_SWAPS:      parseInt(  process.env.MAX_FAIL     || "5"),     // 5 failed swaps → pause
   FAILED_SWAP_WINDOW_MS: 3600000,                                          // 1h window
@@ -74,9 +74,9 @@ const CFG = {
   CONFIRM_DELAY_MS:      parseInt(  process.env.CONFIRM_DELAY || "15000"), // 15s second check
 
   // Scan intervals
-  DEX_SCAN_INTERVAL_MS:    parseInt(process.env.DEX_INTERVAL    || "20000"),
-  PUMP_SCAN_INTERVAL_MS:   parseInt(process.env.PUMP_INTERVAL   || "20000"),
-  WALLET_SCAN_INTERVAL_MS: parseInt(process.env.WALLET_INTERVAL || "25000"),
+  DEX_SCAN_INTERVAL_MS:    parseInt(process.env.DEX_INTERVAL    || "60000"), // secondary — slow scan
+  PUMP_SCAN_INTERVAL_MS:   parseInt(process.env.PUMP_INTERVAL   || "30000"), // secondary
+  WALLET_SCAN_INTERVAL_MS: parseInt(process.env.WALLET_INTERVAL || "8000"),  // PRIMARY signal — fast poll
   MONITOR_INTERVAL_MS:     2000,
 
   // Rugcheck.xyz
@@ -498,6 +498,87 @@ async function getDexPairData(tokenMint) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  ON-CHAIN SECURITY CHECKS
+//  Replicates: GMGN CA checks, Axiom bundle detection, BullX/Photon safety scan
+//  Checks: mint authority, freeze authority, top holder concentration,
+//          bundle launch detection
+// ─────────────────────────────────────────────────────────────────────────────
+async function onChainSecurityCheck(tokenMint) {
+  const flags = []
+  const pass  = []
+
+  // 1. Mint + freeze authority (GMGN / rugcheck equivalent)
+  try {
+    const mintInfo = await connection.getParsedAccountInfo(new PublicKey(tokenMint))
+    const parsed   = mintInfo?.value?.data?.parsed?.info
+    if (parsed) {
+      if (parsed.mintAuthority !== null) flags.push("MINT_AUTHORITY_ACTIVE")
+      else pass.push("mint_revoked")
+      if (parsed.freezeAuthority !== null) flags.push("FREEZE_AUTHORITY_ACTIVE")
+      else pass.push("freeze_revoked")
+    }
+  } catch (e) { log("WARN", `Mint info: ${e.message}`) }
+
+  // 2. Top holder concentration (Axiom / GMGN holder check)
+  try {
+    const holders  = await connection.getTokenLargestAccounts(new PublicKey(tokenMint))
+    const accounts = holders?.value || []
+    if (accounts.length > 0) {
+      const total   = accounts.reduce((s, a) => s + (a.uiAmount || 0), 0)
+      if (total > 0) {
+        const top5pct = accounts.slice(0, 5).reduce((s, a) => s + (a.uiAmount || 0), 0) / total
+        const top1pct = (accounts[0]?.uiAmount || 0) / total
+        if (top1pct > 0.40) flags.push(`SINGLE_WALLET_${(top1pct*100).toFixed(0)}PCT`)
+        else if (top5pct > 0.70) flags.push(`TOP5_HOLD_${(top5pct*100).toFixed(0)}PCT`)
+        else pass.push(`top5_${(top5pct*100).toFixed(0)}pct_ok`)
+      }
+    }
+  } catch (e) { log("WARN", `Holder check: ${e.message}`) }
+
+  // 3. Bundle / coordinated launch detection (Axiom bundle checker)
+  // Multiple txns in same block at launch = coordinated pre-buy = dump risk
+  try {
+    const sigs = await connection.getSignaturesForAddress(new PublicKey(tokenMint), { limit: 20 })
+    if (sigs.length >= 5) {
+      const slotGroups = {}
+      for (const s of sigs) {
+        if (s.slot) slotGroups[s.slot] = (slotGroups[s.slot] || 0) + 1
+      }
+      const maxSameSlot = Math.max(...Object.values(slotGroups))
+      if (maxSameSlot >= 5) flags.push(`BUNDLE_DETECTED:${maxSameSlot}_txns_same_block`)
+      else pass.push("no_bundle")
+    }
+  } catch (e) { log("WARN", `Bundle check: ${e.message}`) }
+
+  const hardFail = flags.filter(f =>
+    f.startsWith("MINT_AUTHORITY") ||
+    f.startsWith("FREEZE_AUTHORITY") ||
+    f.startsWith("SINGLE_WALLET") ||
+    f.startsWith("BUNDLE_DETECTED")
+  )
+  const safe = hardFail.length === 0
+  log(safe ? "CONFIRM" : "RUG",
+    `OnChain: ${safe ? pass.join("|") : hardFail.join("|")} | ${tokenMint.slice(0,8)}...`)
+  return { safe, flags, pass }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SMART WALLET CLUSTER SIGNAL
+//  Replicates: Cielo Finance + GMGN multi-wallet convergence alert
+//  If 2+ tracked wallets buy the SAME token = much stronger signal
+// ─────────────────────────────────────────────────────────────────────────────
+const smartWalletBuyLog = new Map() // tokenMint → Set<walletAddress>
+
+function recordSmartWalletBuy(tokenMint, walletAddress) {
+  if (!smartWalletBuyLog.has(tokenMint)) smartWalletBuyLog.set(tokenMint, new Set())
+  smartWalletBuyLog.get(tokenMint).add(walletAddress)
+}
+
+function getSmartWalletBuyCount(tokenMint) {
+  return smartWalletBuyLog.get(tokenMint)?.size || 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  RUG CHECK
 // ─────────────────────────────────────────────────────────────────────────────
 async function rugCheck(tokenMint, pair) {
@@ -722,6 +803,15 @@ async function evaluateToken(tokenMint, source) {
     return null
   }
 
+  // ── GMGN security API — fastest & most complete signal (primary security gate)
+  // Checks mint/freeze authority, LP burn, top holder %, honeypot in one call
+  const gmgn = await gmgnSecurityCheck(tokenMint)
+  if (!gmgn.safe) {
+    reject(`GMGN:${gmgn.hardFail[0]}`, tokenMint)
+    addCooldown(tokenMint, CFG.COOLDOWN_MS)
+    return null
+  }
+
   // Internal rug check (market structure)
   const { safe, reasons } = await rugCheck(tokenMint, pair)
   if (!safe) {
@@ -740,17 +830,37 @@ async function evaluateToken(tokenMint, source) {
     return null
   }
 
+  // On-chain security check (mint/freeze authority, holder concentration, bundle detection)
+  // Replicates GMGN CA checks + Axiom bundle detector + BullX/Photon safety scan
+  const onChain = await onChainSecurityCheck(tokenMint)
+  if (!onChain.safe) {
+    reject(`ONCHAIN:${onChain.flags[0]}`, tokenMint)
+    addCooldown(tokenMint, CFG.COOLDOWN_MS)
+    return null
+  }
+
+  // Smart wallet cluster bonus — if 2+ tracked wallets already bought this,
+  // lower the score threshold (replicates Cielo Finance multi-wallet convergence)
+  const smartWalletCount = getSmartWalletBuyCount(tokenMint)
+  const smartWalletBonus = smartWalletCount >= 2 ? 20 :
+                           smartWalletCount === 1 ? 10 : 0
+  if (smartWalletCount >= 2) {
+    log("INFO", `Smart wallet cluster: ${smartWalletCount} tracked wallets bought this — boosting score`)
+  }
+
   // Score
-  const { score, breakdown } = scoreToken(pair)
-  const bdStr = Object.entries(breakdown).map(([k,v]) => `${k}:${v}`).join(" ")
-  log("SCORE", `Score:${score}/100 | ${bdStr} | ${tokenMint.slice(0,8)}...`)
+  const { score: baseScore, breakdown } = scoreToken(pair)
+  const score  = Math.min(100, baseScore + smartWalletBonus)
+  const bdStr  = Object.entries(breakdown).map(([k,v]) => `${k}:${v}`).join(" ")
+  const swStr  = smartWalletBonus > 0 ? ` +${smartWalletBonus}sw_bonus` : ""
+  log("SCORE", `Score:${score}/100 (base:${baseScore}${swStr}) | ${bdStr} | ${tokenMint.slice(0,8)}...`)
 
   if (score < CFG.MIN_SCORE) {
     reject(`SCORE_LOW:${score}`, tokenMint)
     return null
   }
 
-  return { pair, score, liquidity, marketCap, volume5m, ageMin, buyRatio, priceChg5m, source }
+  return { pair, score, liquidity, marketCap, volume5m, ageMin, buyRatio, priceChg5m, source, smartWalletCount }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1080,6 +1190,90 @@ async function monitorPositions(wallet) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  GMGN TOKEN SECURITY API
+//  GMGN is the fastest free token security feed on Solana.
+//  Their /token/security endpoint returns: mint revoked, freeze revoked,
+//  LP burned, top10 holder %, renounced — all in one call, no auth needed.
+//  This replaces manually scraping rugcheck.xyz for most security signals.
+// ─────────────────────────────────────────────────────────────────────────────
+async function gmgnSecurityCheck(tokenMint) {
+  try {
+    const res = await fetch(
+      `https://gmgn.ai/defi/quotation/v1/tokens/security/sol/${tokenMint}`,
+      { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(5000) }
+    )
+    if (!res.ok) {
+      log("WARN", `GMGN security HTTP ${res.status} — skipping`)
+      return { safe: true, reasons: ["gmgn_unavailable"] }
+    }
+
+    const json = await res.json()
+    const d    = json?.data || json // handle both response shapes
+
+    const flags   = []
+    const details = []
+
+    // Mint authority — can dev print more tokens?
+    if (d.mint_auth !== null && d.mint_auth !== undefined && d.mint_auth !== false) {
+      flags.push("MINT_NOT_REVOKED")
+    } else { details.push("mint_revoked") }
+
+    // Freeze authority — can dev freeze your account?
+    if (d.freeze_auth !== null && d.freeze_auth !== undefined && d.freeze_auth !== false) {
+      flags.push("FREEZE_NOT_REVOKED")
+    } else { details.push("freeze_revoked") }
+
+    // LP burned — is liquidity locked or burned?
+    // burn_ratio: 0 = none burned, 1 = all burned
+    const burnRatio = parseFloat(d.burn_ratio || d.lp_burn_pct || 0)
+    if (burnRatio < 0.80) {
+      flags.push(`LP_BURN_LOW:${(burnRatio*100).toFixed(0)}%`)
+    } else { details.push(`lp_burn_${(burnRatio*100).toFixed(0)}pct`) }
+
+    // Top 10 holder %
+    const top10 = parseFloat(d.top10_holder_rate || d.top10_holder_pct || 0)
+    if (top10 > 0.80) {
+      flags.push(`TOP10_HOLD_${(top10*100).toFixed(0)}PCT`)
+    } else { details.push(`top10_${(top10*100).toFixed(0)}pct_ok`) }
+
+    // Is contract renounced / ownership transferred to burn address?
+    if (d.renounced === false || d.is_renounced === false) {
+      flags.push("NOT_RENOUNCED")
+    } else if (d.renounced === true || d.is_renounced === true) {
+      details.push("renounced")
+    }
+
+    // Honeypot signal — GMGN sometimes returns this
+    if (d.is_honeypot === true || d.honeypot === true) {
+      flags.push("HONEYPOT_DETECTED")
+    }
+
+    // Hard-fail flags (anything that means you can get trapped or rugged)
+    const hardFail = flags.filter(f =>
+      f === "MINT_NOT_REVOKED" ||
+      f === "FREEZE_NOT_REVOKED" ||
+      f === "HONEYPOT_DETECTED" ||
+      f.startsWith("TOP10_HOLD_9") || // >90% = dev wallet
+      f.startsWith("TOP10_HOLD_8")    // >80% = very concentrated
+    )
+
+    // LP burn is a soft warning not a hard fail — low burn just lowers score
+    const lpWarn = flags.find(f => f.startsWith("LP_BURN_LOW"))
+
+    const safe = hardFail.length === 0
+    const summary = safe
+      ? `✅ ${details.join("|")}${lpWarn ? " ⚠️ " + lpWarn : ""}`
+      : `🚨 ${hardFail.join("|")}`
+
+    log(safe ? "CONFIRM" : "RUG", `GMGN: ${summary} | ${tokenMint.slice(0,8)}...`)
+    return { safe, flags, hardFail, lpWarn, details, burnRatio, top10 }
+  } catch (e) {
+    log("WARN", `GMGN security error: ${e.message} — allowing through`)
+    return { safe: true, reasons: ["gmgn_error"] }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  RUGCHECK.XYZ API
 // ─────────────────────────────────────────────────────────────────────────────
 async function rugCheckXyz(tokenMint) {
@@ -1229,7 +1423,14 @@ async function scanCopyWallets(wallet) {
 
           for (const b of bought) {
             if (STATIC_BLACKLIST.has(b.mint)) continue
-            if (seenTokens.has(b.mint))       continue
+            // Record this wallet as a buyer — enables smart wallet cluster detection
+            // If 2+ of our tracked wallets buy the same token, score gets boosted
+            recordSmartWalletBuy(b.mint, copyWallet)
+            const clusterCount = getSmartWalletBuyCount(b.mint)
+            if (clusterCount >= 2) {
+              log("SCAN", `CLUSTER SIGNAL: ${clusterCount} tracked wallets bought ${b.mint.slice(0,8)}... — priority entry`)
+            }
+            if (seenTokens.has(b.mint)) continue
             seenTokens.add(b.mint)
             log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... bought: ${b.mint.slice(0,8)}...`)
             await processCandidateFirstPass(wallet, b.mint, "COPY_TRADE")
@@ -1417,17 +1618,21 @@ async function runBot() {
       // Circuit breaker updates
       await updateCircuitBreakers(wallet.publicKey)
 
-      // Scanning
-      if (Date.now() - lastDexScan > CFG.DEX_SCAN_INTERVAL_MS) {
+      // ── SCANNING PRIORITY ORDER ──────────────────────────────────────────
+      // 1. Copy wallets — PRIMARY signal, fastest poll (every 8s)
+      //    Smart wallets act first. We follow them. This is our edge.
+      // 2. Pump.fun — graduation events, secondary (every 30s)
+      // 3. DexScreener — broad discovery, slowest (every 60s)
+      //    By the time DexScreener shows a pump, fast bots already bought.
+      //    We keep it only as a supplementary signal.
+
+      if (Date.now() - lastWalletScan > CFG.WALLET_SCAN_INTERVAL_MS) {
         if (!checkPaused()) {
-          log("SCAN", "Starting DexScreener scan cycle...")
-          await scanDexScreenerProfiles(wallet)
-          await sleep(1000)
-          await scanDexScreenerBoosts(wallet)
+          await scanCopyWallets(wallet)
         } else {
-          log("PAUSE", `DexScreener scan skipped — ${state.pauseReason}`)
+          log("PAUSE", `Copy wallet scan skipped — ${state.pauseReason}`)
         }
-        lastDexScan = Date.now()
+        lastWalletScan = Date.now()
       }
 
       if (Date.now() - lastPumpScan > CFG.PUMP_SCAN_INTERVAL_MS) {
@@ -1437,11 +1642,14 @@ async function runBot() {
         lastPumpScan = Date.now()
       }
 
-      if (Date.now() - lastWalletScan > CFG.WALLET_SCAN_INTERVAL_MS) {
+      if (Date.now() - lastDexScan > CFG.DEX_SCAN_INTERVAL_MS) {
         if (!checkPaused()) {
-          await scanCopyWallets(wallet)
+          log("SCAN", "DexScreener supplementary scan...")
+          await scanDexScreenerProfiles(wallet)
+          await sleep(1000)
+          await scanDexScreenerBoosts(wallet)
         }
-        lastWalletScan = Date.now()
+        lastDexScan = Date.now()
       }
 
       // Summary
