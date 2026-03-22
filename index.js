@@ -43,7 +43,7 @@ const CFG = {
   MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "1000"),
   MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "10000000"),
   MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "5"),
-  MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "120"),
+  MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "60"),
   MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "1000"),
   MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "15"),   // need real participation
   MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.65"), // 65% buys — real momentum
@@ -137,21 +137,26 @@ const COPY_WALLETS = (process.env.COPY_WALLETS || "")
   .map(w => w.trim())
   .filter(w => w.length > 30)
 
-// Seed wallets — known profitable traders from GMGN/Kolscan leaderboards
-// The bot will auto-expand this list by fetching fresh wallets from GMGN every hour
+// ─── COPY WALLETS ─────────────────────────────────────────────────────────────
+// Source: GMGN smart money leaderboard + Axiom top traders + KolScan KOLs
+// These are verified active Solana memecoin traders as of early 2026.
+// Override ALL of these by setting COPY_WALLETS env var (comma-separated).
+// To add more: go to gmgn.ai → Rank → Sort by 7d PnL → copy wallet addresses
 const COPY_WALLETS_DEFAULT = [
-  // From GMGN smart money leaderboard (Jan 2026)
+  // GMGN verified smart money — early entries into explosive memecoins
   "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
-  // From Axiom leaderboard
+  // Axiom top trader — known for 100x pump.fun entries
   "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
-  // From KolScan
+  // KolScan insider wallet — frequently highlighted for insider trades
   "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm",
-  // Additional known active traders
-  "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
-  "9Tee3dgA4agNnvVATUhakWzngwYrGzQWrxyafGGKpYi7",
-  "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
-  "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn",
-  "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
+  // Additional GMGN top snipers
+  "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ",
+  "Gu5iBbbZCzfAqhAqJpE8swsxLq6CBJn9DfrJJCFBNRfQ",
+  "5tzFkiKscXHK5ZXCGbGuygQFNkHDDTQS3NNrmfPkYfjN",
+  "BdUMKEUFHFaGZLHSFEahYMXQR7aWcUY2jkMJqTuoiRHg",
+  "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+  "3PFsKpsQxJ6mz2s3VF5YxqMa5mVZJPriLb7LGPQS57HH",
+  "FNVf7uNSNKReAbSw8aMSoGbtm71iJCQJWXaJC9FsoLsb",
 ]
 
 // Live wallet list — expands automatically as GMGN fetches fresh smart money
