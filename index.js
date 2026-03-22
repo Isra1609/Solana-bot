@@ -1123,11 +1123,22 @@ async function processConfirmations(wallet) {
     if (state.positions[tokenMint]) continue
 
     log("INFO", `Second-pass confirming ${tokenMint.slice(0,8)}...`)
-    const data = await evaluateToken(tokenMint, entry.source)
+
+    // Try fresh DexScreener data first. If DexScreener has no data yet
+    // (token too new to be indexed), fall back to cached first-pass data.
+    // This prevents NO_DEX_DATA from killing trades on very fresh tokens.
+    let data = await evaluateToken(tokenMint, entry.source)
     if (!data) {
-      log("REJECT", `Second pass FAILED for ${tokenMint.slice(0,8)}... — aborting entry`)
-      addCooldown(tokenMint, 1800000) // 30min after double-fail
-      continue
+      const firstPassAge = Date.now() - entry.firstPassAt
+      if (firstPassAge < 30000 && entry.firstData) {
+        // First pass was recent and data was good — trust the cache
+        log("INFO", `DexScreener not indexed yet — using first-pass data for ${tokenMint.slice(0,8)}...`)
+        data = entry.firstData
+      } else {
+        log("REJECT", `Second pass FAILED for ${tokenMint.slice(0,8)}... — aborting entry`)
+        addCooldown(tokenMint, 300000) // 5min cooldown, not 30min — don't over-penalise
+        continue
+      }
     }
 
     log("INFO", `✔ Second pass OK | score:${data.score} | Proceeding to buy`)
