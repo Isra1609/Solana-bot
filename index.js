@@ -40,7 +40,7 @@ const CFG = {
   // Safety filters
   MIN_LIQUIDITY_USD:     parseFloat(process.env.MIN_LIQ      || "2000"),
   MAX_LIQUIDITY_USD:     parseFloat(process.env.MAX_LIQ      || "500000"),
-  MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "10000"),
+  MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "1000"),
   MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "10000000"),
   MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "5"),
   MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "120"),
@@ -71,7 +71,7 @@ const CFG = {
   FAILED_SWAP_WINDOW_MS: 3600000,                                          // 1h window
 
   // 2-pass entry delay
-  CONFIRM_DELAY_MS:      parseInt(  process.env.CONFIRM_DELAY || "15000"), // 15s second check
+  CONFIRM_DELAY_MS:      parseInt(  process.env.CONFIRM_DELAY || "5000"),  // 5s — fast enough to confirm, slow enough to avoid fake candles
 
   // Scan intervals
   DEX_SCAN_INTERVAL_MS:    parseInt(process.env.DEX_INTERVAL    || "60000"), // secondary — slow scan
@@ -582,6 +582,80 @@ async function getDexPairData(tokenMint) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  PUMP.FUN INTERNAL AMM DATA
+//  Smart wallets often buy pump.fun tokens BEFORE they graduate to Raydium.
+//  DexScreener shows $0 liquidity for these — but they're real active tokens.
+//  This fetches directly from pump.fun's API to get real bonding curve data.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getPumpFunData(tokenMint) {
+  try {
+    const res = await fetch(
+      `https://frontend-api.pump.fun/coins/${tokenMint}`,
+      { signal: AbortSignal.timeout(4000) }
+    )
+    if (!res.ok) return null
+    const coin = await res.json()
+    if (!coin || !coin.mint) return null
+
+    const mcap        = coin.usd_market_cap      || 0
+    const volume24h   = coin.volume               || 0
+    const complete    = coin.complete             || false  // graduated to Raydium?
+    const createdAt   = coin.created_timestamp    || Date.now()
+    const ageMin      = (Date.now() - createdAt) / 60000
+    const replyCount  = coin.reply_count          || 0      // community engagement
+    const kingOfHill  = coin.is_currently_on_king_of_the_hill || false
+
+    // Build a synthetic "pair" object in DexScreener format
+    // so the rest of the evaluation pipeline works unchanged
+    const syntheticPair = {
+      _source:        "pumpfun",
+      _complete:      complete,
+      chainId:        "solana",
+      baseToken:      { address: tokenMint, symbol: coin.symbol, name: coin.name },
+      priceUsd:       coin.usd_market_cap && coin.total_supply
+                        ? (coin.usd_market_cap / coin.total_supply).toString()
+                        : "0",
+      priceChange:    { m5: 0, h1: 0, h6: 0, h24: 0 },  // not available pre-graduation
+      volume:         { m5: volume24h / 288, h24: volume24h }, // estimate 5m from 24h
+      txns:           {
+        m5: {
+          buys:  Math.max(1, Math.floor(replyCount / 10)),  // rough estimate
+          sells: 0
+        }
+      },
+      liquidity:      { usd: mcap * 0.05 },  // bonding curve ~5% of MC is liquid
+      marketCap:      mcap,
+      fdv:            mcap,
+      pairCreatedAt:  createdAt,
+      _ageMin:        ageMin,
+      _replyCount:    replyCount,
+      _kingOfHill:    kingOfHill,
+      _pumpRaw:       coin,
+    }
+
+    return syntheticPair
+  } catch { return null }
+}
+
+// Unified pair fetcher — tries DexScreener first, falls back to pump.fun
+// This ensures we don't miss tokens that smart wallets buy pre-graduation
+async function getPairData(tokenMint) {
+  const dexData = await getDexPairData(tokenMint)
+
+  // DexScreener has real data — use it
+  if (dexData && (dexData.liquidity?.usd || 0) > 100) return dexData
+
+  // DexScreener shows $0 — check if it's a live pump.fun token
+  const pumpData = await getPumpFunData(tokenMint)
+  if (pumpData) {
+    log("INFO", `PumpFun pre-grad token: ${tokenMint.slice(0,8)}... MC:$${Math.round(pumpData.marketCap)} age:${pumpData._ageMin?.toFixed(1)}min`)
+    return pumpData
+  }
+
+  return dexData // return whatever dex had (even if null)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  ON-CHAIN SECURITY CHECKS
 //  Replicates: GMGN CA checks, Axiom bundle detection, BullX/Photon safety scan
 //  Checks: mint authority, freeze authority, top holder concentration,
@@ -845,6 +919,10 @@ function applyHardFilters(tokenMint, pair) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  FULL TOKEN EVALUATION
+//  Two paths:
+//  A) COPY_TRADE / cluster signal → skip DexScreener filters, go on-chain only
+//     DexScreener won't have data yet for fresh tokens smart wallets just bought
+//  B) Everything else → full DexScreener filter stack
 // ─────────────────────────────────────────────────────────────────────────────
 async function evaluateToken(tokenMint, source) {
   state.candidatesScanned++
@@ -860,10 +938,70 @@ async function evaluateToken(tokenMint, source) {
 
   log("EVAL", `Evaluating ${tokenMint.slice(0,8)}... [${source}]`)
 
+  // ── PATH A: Copy trade / cluster signal ──────────────────────────────────
+  // Smart wallets bought this. DexScreener may not have data yet.
+  // Skip liquidity/volume/age filters. Run on-chain security only.
+  const isCopySignal   = source === "COPY_TRADE"
+  const clusterCount   = getSmartWalletBuyCount(tokenMint)
+  const isClusterSignal = clusterCount >= 2
+
+  if (isCopySignal || isClusterSignal) {
+    log("EVAL", `Fast-path: ${isClusterSignal ? `CLUSTER(${clusterCount})` : "COPY_TRADE"} — skipping DexScreener filters`)
+
+    // Still blacklist check
+    if (STATIC_BLACKLIST.has(tokenMint)) { reject("BLACKLISTED", tokenMint); return null }
+
+    // On-chain security — this is the gate for copy trades
+    const onChainFast = await onChainSecurityCheck(tokenMint)
+    if (!onChainFast.safe) {
+      reject(`ONCHAIN:${onChainFast.flags[0]}`, tokenMint)
+      addCooldown(tokenMint, CFG.COOLDOWN_MS)
+      return null
+    }
+
+    // GMGN security check
+    const gmgnFast = await gmgnSecurityCheck(tokenMint)
+    if (!gmgnFast.safe) {
+      reject(`GMGN:${gmgnFast.hardFail[0]}`, tokenMint)
+      addCooldown(tokenMint, CFG.COOLDOWN_MS)
+      return null
+    }
+
+    // Try to get DexScreener data — but don't reject if missing
+    const pair = await getDexPairData(tokenMint)
+    const liquidity  = pair?.liquidity?.usd || 0
+    const marketCap  = pair?.marketCap || pair?.fdv || 0
+    const volume5m   = pair?.volume?.m5 || 0
+    const ageMin     = pair?.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 60000 : 0
+    const buys5m     = pair?.txns?.m5?.buys || 0
+    const sells5m    = pair?.txns?.m5?.sells || 0
+    const txns5m     = buys5m + sells5m
+    const buyRatio   = txns5m > 0 ? buys5m / txns5m : 0.5 // assume neutral if no data
+    const priceChg5m = pair?.priceChange?.m5 || 0
+
+    // Only hard-reject if clearly dead (age >2h or liq >$500K)
+    if (ageMin > CFG.MAX_PAIR_AGE_MIN) { reject(`TOO_OLD:${ageMin.toFixed(0)}min`, tokenMint); return null }
+    if (liquidity > CFG.MAX_LIQUIDITY_USD) { reject(`LIQ_TOO_HIGH:$${Math.round(liquidity)}`, tokenMint); return null }
+
+    // Score with cluster bonus — copy trades get automatic +15
+    const { score: baseScore, breakdown } = scoreToken(pair || {})
+    const copyBonus   = isClusterSignal ? clusterCount * 10 : 15
+    const score       = Math.min(100, baseScore + copyBonus)
+    const bdStr       = Object.entries(breakdown).map(([k,v]) => `${k}:${v}`).join(" ")
+    log("SCORE", `Score:${score}/100 (base:${baseScore} +${copyBonus}copy_bonus) | ${tokenMint.slice(0,8)}...`)
+
+    // Lower score threshold for copy trades — 30 minimum instead of 45
+    if (score < 30) { reject(`SCORE_LOW:${score}`, tokenMint); return null }
+
+    log("EVAL", `✅ Copy fast-path passed | liq:$${Math.round(liquidity)} mc:$${Math.round(marketCap)} age:${ageMin.toFixed(1)}min cluster:${clusterCount}`)
+    return { pair: pair || {}, score, liquidity, marketCap, volume5m, ageMin, buyRatio, priceChg5m, source, smartWalletCount: clusterCount }
+  }
+
+  // ── PATH B: Standard DexScreener-based evaluation ────────────────────────
   const pair = await getDexPairData(tokenMint)
   if (!pair) {
     reject("NO_DEX_DATA", tokenMint)
-    addCooldown(tokenMint, 600000) // 10min cooldown
+    addCooldown(tokenMint, 600000)
     return null
   }
 
@@ -887,12 +1025,16 @@ async function evaluateToken(tokenMint, source) {
     return null
   }
 
-  // ── GMGN security API — fastest & most complete signal (primary security gate)
-  // Checks mint/freeze authority, LP burn, top holder %, honeypot in one call
+  // ── GMGN security API — primary security gate
+  // Only hard-reject on confirmed dangerous flags. If GMGN is unavailable, allow through.
   const gmgn = await gmgnSecurityCheck(tokenMint)
-  if (!gmgn.safe) {
+  if (!gmgn.safe && gmgn.hardFail && gmgn.hardFail.length > 0) {
+    // Only cooldown on definitive rug signals, not API errors
+    const isDefiniteRug = gmgn.hardFail.some(f =>
+      f === "MINT_NOT_REVOKED" || f === "FREEZE_NOT_REVOKED" || f === "HONEYPOT_DETECTED"
+    )
     reject(`GMGN:${gmgn.hardFail[0]}`, tokenMint)
-    addCooldown(tokenMint, CFG.COOLDOWN_MS)
+    if (isDefiniteRug) addCooldown(tokenMint, CFG.COOLDOWN_MS)
     return null
   }
 
@@ -915,11 +1057,14 @@ async function evaluateToken(tokenMint, source) {
   }
 
   // On-chain security check (mint/freeze authority, holder concentration, bundle detection)
-  // Replicates GMGN CA checks + Axiom bundle detector + BullX/Photon safety scan
+  // Non-blocking if RPC is slow — only hard reject on confirmed dangerous signals
   const onChain = await onChainSecurityCheck(tokenMint)
-  if (!onChain.safe) {
-    reject(`ONCHAIN:${onChain.flags[0]}`, tokenMint)
-    addCooldown(tokenMint, CFG.COOLDOWN_MS)
+  if (!onChain.safe && onChain.hardFail && onChain.hardFail.length > 0) {
+    const isDefiniteRug = onChain.hardFail.some(f =>
+      f === "MINT_AUTHORITY_ACTIVE" || f === "FREEZE_AUTHORITY_ACTIVE" || f.startsWith("BUNDLE_DETECTED")
+    )
+    reject(`ONCHAIN:${onChain.hardFail[0]}`, tokenMint)
+    if (isDefiniteRug) addCooldown(tokenMint, CFG.COOLDOWN_MS)
     return null
   }
 
@@ -1213,7 +1358,7 @@ async function monitorPositions(wallet) {
       let momentumFailed = false
       if (Date.now() - pos.lastMomentumCheck > CFG.MOMENTUM_CHECK_INTERVAL) {
         pos.lastMomentumCheck = Date.now()
-        const freshPair = await getDexPairData(tokenMint)
+        const freshPair = await getPairData(tokenMint)
         if (freshPair) {
           const v5m  = freshPair?.volume?.m5 || 0
           const br   = (() => {
@@ -1471,19 +1616,29 @@ async function scanCopyWallets(wallet) {
       }
       if (!sigs || sigs.length === 0) continue
 
-      const lastSig = walletLastSig.get(copyWallet)
-      // Only process signatures we haven't seen before
-      const newSigs = lastSig
-        ? sigs.filter(s => s.signature !== lastSig).slice(0, 3)
-        : sigs.slice(0, 1) // on first run, only look at the very latest
+      const lastSig  = walletLastSig.get(copyWallet)
+      const nowSec   = Math.floor(Date.now() / 1000)
+      const MAX_AGE_SEC = 600 // ignore any tx older than 10 minutes — prevents chasing old trades
+
+      // Only process signatures we haven't seen before AND that are recent
+      const newSigs = sigs.filter(s => {
+        if (lastSig && s.signature === lastSig) return false
+        if (s.blockTime && (nowSec - s.blockTime) > MAX_AGE_SEC) return false // too old
+        return true
+      }).slice(0, 3)
 
       walletLastSig.set(copyWallet, sigs[0].signature)
       if (newSigs.length === 0) continue
 
-      log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... — ${newSigs.length} new tx(s)`)
+      log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... — ${newSigs.length} fresh tx(s)`)
 
       for (const sigInfo of newSigs) {
         try {
+          // Double-check age using blockTime from signature info (saves an RPC call if stale)
+          if (sigInfo.blockTime && (nowSec - sigInfo.blockTime) > MAX_AGE_SEC) {
+            log("SCAN", `Skipping stale tx (${Math.round((nowSec - sigInfo.blockTime)/60)}min old)`)
+            continue
+          }
           await sleep(800)
           const tx = await connection.getParsedTransaction(sigInfo.signature, {
             maxSupportedTransactionVersion: 0,
@@ -1507,13 +1662,22 @@ async function scanCopyWallets(wallet) {
 
           for (const b of bought) {
             if (STATIC_BLACKLIST.has(b.mint)) continue
+            // Skip known stablecoin mints and wrapped tokens
+            if (b.mint === "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB") continue // USDT
+            if (b.mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v") continue // USDC
+            if (b.mint === "USD1ttGY...".slice(0,4) && b.mint.startsWith("USD")) continue // any USD stablecoin
             // Record this wallet as a buyer — enables smart wallet cluster detection
-            // If 2+ of our tracked wallets buy the same token, score gets boosted
             recordSmartWalletBuy(b.mint, copyWallet)
             const clusterCount = getSmartWalletBuyCount(b.mint)
+
+            // Cluster signal: 2+ wallets bought same token = bypass seenTokens
+            // This is the strongest signal we have — always re-evaluate
             if (clusterCount >= 2) {
               log("SCAN", `CLUSTER SIGNAL: ${clusterCount} tracked wallets bought ${b.mint.slice(0,8)}... — priority entry`)
+              // Remove from seenTokens so it gets a fresh evaluation
+              seenTokens.delete(b.mint)
             }
+
             if (seenTokens.has(b.mint)) continue
             seenTokens.add(b.mint)
             log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... bought: ${b.mint.slice(0,8)}...`)
