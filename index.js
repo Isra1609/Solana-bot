@@ -42,7 +42,7 @@ const CFG = {
   MAX_LIQUIDITY_USD:     parseFloat(process.env.MAX_LIQ      || "500000"),
   MIN_MCAP_USD:          parseFloat(process.env.MIN_MCAP     || "1000"),
   MAX_MCAP_USD:          parseFloat(process.env.MAX_MCAP     || "10000000"),
-  MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "5"),
+  MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "2"),
   MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "60"),
   MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "1000"),
   MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "15"),   // need real participation
@@ -844,8 +844,9 @@ async function rugCheck(tokenMint, pair) {
     reasons.push(`Liquidity too low: $${Math.round(liquidity)}`)
   }
 
-  // Pair age minimum
-  if (ageMin < CFG.MIN_PAIR_AGE_MIN) {
+  // Pair age minimum — skip for bonding curve tokens (they're meant to be new)
+  const isPumpBonding = pair?._source === "pumpfun" && !pair?._complete
+  if (!isPumpBonding && ageMin < CFG.MIN_PAIR_AGE_MIN) {
     reasons.push(`Too new: ${ageMin.toFixed(1)}min`)
   }
 
@@ -982,11 +983,14 @@ function applyHardFilters(tokenMint, pair) {
 
   if (STATIC_BLACKLIST.has(tokenMint))                    return "BLACKLISTED"
   if (inCooldown(tokenMint))                              return "COOLDOWN"
-  if (liquidity < CFG.MIN_LIQUIDITY_USD)                  return `LIQ_TOO_LOW:$${Math.round(liquidity)}`
+  // (liq check moved above with bonding curve bypass)
   if (liquidity > CFG.MAX_LIQUIDITY_USD)                  return `LIQ_TOO_HIGH:$${Math.round(liquidity)}`
   if (marketCap > 0 && marketCap < CFG.MIN_MCAP_USD)     return `MCAP_TOO_LOW:$${Math.round(marketCap)}`
   if (marketCap > CFG.MAX_MCAP_USD)                      return `MCAP_TOO_HIGH:$${Math.round(marketCap)}`
-  if (ageMin < CFG.MIN_PAIR_AGE_MIN)                      return `TOO_NEW:${ageMin.toFixed(1)}min`
+  // Bonding curve tokens are intentionally new and have synthetic liquidity — skip those checks
+  const isBondingCurve = pair?._source === "pumpfun" && !pair?._complete
+  if (!isBondingCurve && ageMin < CFG.MIN_PAIR_AGE_MIN)  return `TOO_NEW:${ageMin.toFixed(1)}min`
+  if (!isBondingCurve && liquidity < CFG.MIN_LIQUIDITY_USD) return `LIQ_TOO_LOW:$${Math.round(liquidity)}`
   if (ageMin > CFG.MAX_PAIR_AGE_MIN)                      return `TOO_OLD:${ageMin.toFixed(1)}min`
   if (volume5m < CFG.MIN_VOL_5M)                          return `VOL5M_LOW:$${Math.round(volume5m)}`
   if (txns5m < CFG.MIN_TXNS_5M)                          return `TXNS5M_LOW:${txns5m}`
@@ -1804,22 +1808,10 @@ async function scanCopyWallets(wallet) {
             if (b.mint === "USD1ygnE8URFjQRouBKmhkBkEMxKFnHczvF6KCQHQ4Ud")  continue // USD1
 
             // ── Quick viability check ────────────────────────────────────────
-            // We now support BOTH pre-grad bonding curve (PumpPortal) AND
-            // post-grad DEX tokens (Jupiter). Only skip truly dead tokens.
-            // Dead = no DexScreener data AND no pump.fun data (token doesn't exist)
-            try {
-              const quickDex = await getDexPairData(b.mint)
-              const quickLiq = quickDex?.liquidity?.usd || 0
-              if (quickLiq === 0) {
-                // No DEX liq — check if it's a live pump.fun bonding curve token
-                const quickPump = await getPumpFunData(b.mint)
-                if (!quickPump || (quickPump.marketCap || 0) < 1000) {
-                  log("SCAN", `Skip dead token (no DEX + no pump.fun): ${b.mint.slice(0,8)}...`)
-                  continue
-                }
-                log("SCAN", `Pre-grad bonding curve token MC:$${Math.round(quickPump.marketCap)} — will use PumpPortal`)
-              }
-            } catch { /* if check fails, proceed anyway */ }
+            // Allow both pre-grad (bonding curve via PumpPortal) and post-grad DEX tokens.
+            // Only hard-skip tokens that exist on neither DEX nor pump.fun.
+            // We intentionally allow $0 DEX liq — PumpPortal handles those.
+            // No pre-flight blocking here — let evaluateToken + PumpPortal decide.
 
             // Record this wallet as a buyer — enables smart wallet cluster detection
             recordSmartWalletBuy(b.mint, copyWallet)
