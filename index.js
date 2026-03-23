@@ -138,25 +138,20 @@ const COPY_WALLETS = (process.env.COPY_WALLETS || "")
   .filter(w => w.length > 30)
 
 // ─── COPY WALLETS ─────────────────────────────────────────────────────────────
-// Source: GMGN smart money leaderboard + Axiom top traders + KolScan KOLs
-// These are verified active Solana memecoin traders as of early 2026.
-// Override ALL of these by setting COPY_WALLETS env var (comma-separated).
-// To add more: go to gmgn.ai → Rank → Sort by 7d PnL → copy wallet addresses
+// Source: GMGN smart money leaderboard — verified by user Mar 23 2026
+// Override ALL by setting COPY_WALLETS env var (comma-separated)
 const COPY_WALLETS_DEFAULT = [
-  // GMGN verified smart money — early entries into explosive memecoins
-  "H72yLkhTnoBfhBTXXaj1RBXuirm8s8G5fcVh2XpQLggM",
-  // Axiom top trader — known for 100x pump.fun entries
-  "4Be9CvxqHW6BYiRAxW9Q3xu1ycTMWaL5z8NX4HR3ha7t",
-  // KolScan insider wallet — frequently highlighted for insider trades
-  "AVAZvHLR2PcWpDf8BXY4rVxNHYRBytycHkcB5z5QNXYm",
-  // Additional GMGN top snipers
-  "ASTyfSima4LLAdDgoFGkgqoKowG1LZFDr9fAQrg7iaJZ",
-  "Gu5iBbbZCzfAqhAqJpE8swsxLq6CBJn9DfrJJCFBNRfQ",
-  "5tzFkiKscXHK5ZXCGbGuygQFNkHDDTQS3NNrmfPkYfjN",
-  "BdUMKEUFHFaGZLHSFEahYMXQR7aWcUY2jkMJqTuoiRHg",
-  "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
-  "3PFsKpsQxJ6mz2s3VF5YxqMa5mVZJPriLb7LGPQS57HH",
-  "FNVf7uNSNKReAbSw8aMSoGbtm71iJCQJWXaJC9FsoLsb",
+  "FxwArENkKBx4QyfoEU1vkBnDzMfZV9Z1b8GBzpT9zb5k",
+  "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn",
+  "GdRSPexhxbQz5H2zFQrNN2BAZUqEjAULBigTPvQ6oDMP",
+  "AMRsSeU5JpqwQWJGNLMpZzRCZSFEwYQYbMnms3dD4311",
+  "BVMJKd35CEw4n6BN7NbYPzV5XsoY24H2TawsAJzLG5rh",
+  "cqakon1K22iRvSAnzyNGE44KRk52p7ucRoJtvR6UFem",
+  "4BdKaxN8G6ka4GYtQQWk4G4dZRUTX2vQH9GcXdBREFUk",
+  "5JJLDJ9d7WeP4sz6KGNRF3ueEF33dtbsihGVC5eyQu9D",
+  "5d3jQcuUvsuHyZkhdp78FFqc7WogrzZpTtec1X9VNkuE",
+  "7moqFjvm2MwAiMtCZoqYoTAPzRBxxMRT2ddyHThQuWjr",
+  "DC99qH3jXiq5pPWQd6PjjJcCxTV593s58CLPxWGpEywt",
 ]
 
 // Live wallet list — expands automatically as GMGN fetches fresh smart money
