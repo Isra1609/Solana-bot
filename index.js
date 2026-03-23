@@ -45,23 +45,23 @@ const CFG = {
   MIN_PAIR_AGE_MIN:      parseFloat(process.env.MIN_AGE      || "2"),
   MAX_PAIR_AGE_MIN:      parseFloat(process.env.MAX_AGE      || "60"),
   MIN_VOL_5M:            parseFloat(process.env.MIN_VOL5M    || "1000"),
-  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "15"),   // need real participation
+  MIN_TXNS_5M:           parseInt(  process.env.MIN_TXNS5M   || "20"),   // need real participation,   // need real participation
   MIN_BUY_RATIO:         parseFloat(process.env.MIN_BR       || "0.65"), // 65% buys — real momentum
   MIN_PRICE_CHANGE_5M:   parseFloat(process.env.MIN_PC5M     || "5"),    // only trade actual pumps
   MAX_1H_NEGATIVE:       parseFloat(process.env.MAX_1H_NEG   || "-30"),
   MIN_LIQ_MCAP_RATIO:    parseFloat(process.env.MIN_LM_RATIO || "0.02"),
-  MIN_SCORE:             parseInt(  process.env.MIN_SCORE    || "45"),    // out of 100
+  MIN_SCORE:             parseInt(  process.env.MIN_SCORE    || "55"),    // higher bar — trade less, win more,    // out of 100
 
   // Exit thresholds
-  INITIAL_STOP_PCT:      parseFloat(process.env.STOP_PCT     || "0.08"),  // -8% tight stop
-  BREAKEVEN_TRIGGER_PCT: parseFloat(process.env.BE_PCT       || "0.10"),  // +10% → move stop to BE
-  TP1_PCT:               parseFloat(process.env.TP1          || "0.20"),  // +20% → partial sell
+  INITIAL_STOP_PCT:      parseFloat(process.env.STOP_PCT     || "0.06"),  // -6% tight stop — bonding curve gaps fast,  // -8% tight stop
+  BREAKEVEN_TRIGGER_PCT: parseFloat(process.env.BE_PCT       || "0.05"),  // move to BE at +5%,  // +10% → move stop to BE
+  TP1_PCT:               parseFloat(process.env.TP1          || "0.15"),  // take first profit at +15%,  // +20% → partial sell
   TP1_FRACTION:          parseFloat(process.env.TP1_FRAC     || "0.40"),  // sell 40%
   TP2_PCT:               parseFloat(process.env.TP2          || "0.40"),  // +40% → partial sell
   TP2_FRACTION:          parseFloat(process.env.TP2_FRAC     || "0.35"),  // sell 35%
-  TRAIL_STOP_PCT:        parseFloat(process.env.TRAIL_PCT    || "0.07"),  // 7% trailing
-  MAX_HOLD_MS:           parseInt(  process.env.MAX_HOLD     || "900000"),// 15 min
-  STAGNANT_HOLD_MS:      parseInt(  process.env.STAGNANT_MS  || "300000"),// 5 min with no progress
+  TRAIL_STOP_PCT:        parseFloat(process.env.TRAIL_PCT    || "0.05"),  // 5% trail — lock profits fast,  // 7% trailing
+  MAX_HOLD_MS:           parseInt(  process.env.MAX_HOLD     || "480000"),// 8min max hold,// 15 min
+  STAGNANT_HOLD_MS:      parseInt(  process.env.STAGNANT_MS  || "120000"),// exit stagnant trades in 2min,// 5 min with no progress
   MOMENTUM_CHECK_INTERVAL: 60000,                                          // check momentum every 60s
 
   // Circuit breakers
@@ -83,7 +83,7 @@ const CFG = {
   DEX_SCAN_INTERVAL_MS:    parseInt(process.env.DEX_INTERVAL    || "60000"), // secondary — slow scan
   PUMP_SCAN_INTERVAL_MS:   parseInt(process.env.PUMP_INTERVAL   || "30000"), // secondary
   WALLET_SCAN_INTERVAL_MS: parseInt(process.env.WALLET_INTERVAL || "8000"),  // PRIMARY signal — fast poll
-  MONITOR_INTERVAL_MS:     2000,
+  MONITOR_INTERVAL_MS:     1000, // 1s loop — catch fast dumps before gap-through
 
   // Rugcheck.xyz
   RUGCHECK_ENABLED:      process.env.RUGCHECK !== "false",
@@ -1825,7 +1825,25 @@ async function scanCopyWallets(wallet) {
 
             if (seenTokens.has(b.mint)) continue
             seenTokens.add(b.mint)
-            log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... bought: ${b.mint.slice(0,8)}...`)
+
+            // ── CRITICAL: Verify copied wallet is STILL holding ──────────────
+            // If they already sold, we'd be buying their exit. Check their
+            // current token balance before entering. If zero = they dumped = skip.
+            try {
+              const theirBalance = await connection.getParsedTokenAccountsByOwner(
+                new PublicKey(copyWallet),
+                { mint: new PublicKey(b.mint) }
+              )
+              const theirAmt = parseFloat(
+                theirBalance.value[0]?.account?.data?.parsed?.info?.tokenAmount?.uiAmount || "0"
+              )
+              if (theirAmt === 0) {
+                log("SCAN", `Skip — ${copyWallet.slice(0,8)}... already sold ${b.mint.slice(0,8)}...`)
+                continue
+              }
+            } catch { /* RPC error — allow through, better to trade than miss */ }
+
+            log("SCAN", `CopyWallet ${copyWallet.slice(0,8)}... bought & holding: ${b.mint.slice(0,8)}...`)
             await processCandidateFirstPass(wallet, b.mint, "COPY_TRADE")
           }
         } catch (e) {
